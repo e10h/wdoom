@@ -645,6 +645,26 @@ pub unsafe extern "C" fn R_GenerateLookup(texnum: c_int) {
 /// Width comes from `texturewidthmask` (textures are power-of-two wide).
 /// Height is `textureheight` shifted down from 16.16 fixed point.
 /// Returns `(0, 0)` when the texture tables are not ready or `tex` is out of range.
+/// Uppercase wall-texture name, NUL-padded to 8 bytes. Empty when `tex` is out of range.
+pub unsafe fn hw_texture_name(tex: c_int) -> [u8; 8] {
+    let mut out = [0u8; 8];
+    if textures.is_null() || tex < 0 || tex >= numtextures {
+        return out;
+    }
+    let texture = *textures.add(tex as usize);
+    if texture.is_null() {
+        return out;
+    }
+    for i in 0..8 {
+        let c = (*texture).name[i] as u8;
+        if c == 0 {
+            break;
+        }
+        out[i] = c.to_ascii_uppercase();
+    }
+    out
+}
+
 pub unsafe fn hw_texture_size(tex: c_int) -> (i32, i32) {
     if texturewidthmask.is_null() || textureheight.is_null() || tex < 0 || tex >= numtextures {
         return (0, 0);

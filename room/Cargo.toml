@@ -52,6 +52,11 @@ dhat = { version = "0.3", optional = true }
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # libc bindings for C FFI on native platforms
 libc = "0.2"
+# PNG brightmaps from the Brightmaps Plus pack.
+image = { version = "0.25", default-features = false, features = ["png"] }
+egui = "0.35"
+egui-winit = "0.35"
+egui-wgpu = { version = "0.35", features = ["winit"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 # Minimal libc shim providing types and VFS for WebAssembly

@@ -79,6 +79,9 @@ struct App {
     /// `doomgeneric_Create` as `argv`.
     argv: Vec<*mut c_char>,
 
+    /// Option is held. Option-Return toggles fullscreen.
+    alt_down: bool,
+
     /// `true` after `doomgeneric_Create` has returned and the first tick
     /// has been executed, so that subsequent `about_to_wait` calls use
     /// `doomgeneric_Tick` instead.
@@ -116,6 +119,7 @@ impl App {
         Self {
             args,
             argv,
+            alt_down: false,
             doom_initialized: false,
         }
     }
@@ -141,7 +145,7 @@ impl ApplicationHandler for App {
                 DOOMGENERIC_RESX as u32,
                 DOOMGENERIC_RESY as u32,
             ))
-            .with_resizable(false);
+            .with_resizable(true);
 
         let window = match event_loop.create_window(window_attrs) {
             Ok(w) => std::sync::Arc::new(w),
@@ -174,6 +178,32 @@ impl ApplicationHandler for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if let WindowEvent::ModifiersChanged(mods) = &event {
+            self.alt_down = mods.state().alt_key();
+        }
+        if let WindowEvent::KeyboardInput { event: key, .. } = &event {
+            if key.state == winit::event::ElementState::Pressed && !key.repeat {
+                match key.physical_key {
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::F1) => {
+                        platform::release_pointer();
+                    }
+                    winit::keyboard::PhysicalKey::Code(winit::keyboard::KeyCode::Enter)
+                        if self.alt_down =>
+                    {
+                        platform::toggle_fullscreen();
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let ui_used = !matches!(
+            event,
+            WindowEvent::CloseRequested | WindowEvent::Resized(_)
+        ) && GPU.with_borrow_mut(|g| g.as_mut().is_some_and(|gpu| gpu.on_window_event(&event)));
+        if ui_used {
+            return;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 log::info!("Close requested – exiting");

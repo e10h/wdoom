@@ -54,8 +54,21 @@
 extern crate libc_wasm as libc;
 
 pub(crate) mod audio;
+#[cfg(not(target_arch = "wasm32"))]
+mod brightmaps;
+#[cfg(target_arch = "wasm32")]
+mod brightmaps {
+    pub fn wall_level(_name: &[u8; 8], _u: i32, _v: i32, _w: i32, _h: i32) -> u8 {
+        0
+    }
+    pub fn flat_level(_name: &[u8; 8], _u: i32, _v: i32) -> u8 {
+        0
+    }
+}
 pub mod doom;
 pub mod gpu;
+#[cfg(not(target_arch = "wasm32"))]
+mod trace_ui;
 pub mod headless;
 pub mod hw;
 pub mod platform;

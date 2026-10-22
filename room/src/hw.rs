@@ -60,15 +60,27 @@ pub struct Vertex {
 pub struct Scene {
     pub verts: Vec<Vertex>,
     pub indices: Vec<u32>,
+    /// Index count of sky, walls, and flats. Hardware ray tracing traces this
+    /// prefix. Sprites follow, through `world_indices`, and stay rasterized
+    /// so their transparent texels still discard.
+    pub opaque_indices: u32,
     /// Index count of sky, walls, flats, and sprites. The rest are the weapon,
     /// drawn with depth testing disabled so nearby walls do not clip it.
     pub world_indices: u32,
     pub view_proj: [[f32; 4]; 4],
+    /// Camera basis for primary rays. `right`, `up`, and `forward` are unit
+    /// vectors. `aspect` is the projection aspect used by [`view_proj`].
+    pub eye: [f32; 3],
+    pub right: [f32; 3],
+    pub up: [f32; 3],
+    pub forward: [f32; 3],
+    pub aspect: f32,
     /// Fraction of the framebuffer covered by the 3D view: x, y, width, height.
     /// The HUD pass discards this rectangle and keeps the status bar.
     pub view_rect: [f32; 4],
     /// Fresh atlas pixels, present only on the frame the atlas is rebuilt.
-    pub atlas: Option<(u32, Vec<u8>)>,
+    /// The third buffer is the brightmap emission, one byte per texel.
+    pub atlas: Option<(u32, Vec<u8>, Vec<u8>)>,
 }
 
 struct Atlas {
@@ -80,7 +92,7 @@ struct Atlas {
     sprite_size: Vec<(i32, i32)>,
     /// A solid white texel. Voxel faces sample this and carry their color in `tint`.
     white: [f32; 4],
-    pending: Option<(u32, Vec<u8>)>,
+    pending: Option<(u32, Vec<u8>, Vec<u8>)>,
 }
 
 struct Scratch {
@@ -147,6 +159,9 @@ pub unsafe fn build_scene() -> Scene {
             atlas,
             &scratch.flats,
         );
+    }
+    let opaque_indices = scratch.indices.len() as u32;
+    if let Some(atlas) = scratch.atlas.as_ref() {
         push_sprites(&mut scratch.verts, &mut scratch.indices, atlas, right);
     }
     let world_indices = scratch.indices.len() as u32;
@@ -185,8 +200,14 @@ pub unsafe fn build_scene() -> Scene {
     Scene {
         verts,
         indices,
+        opaque_indices,
         world_indices,
         view_proj,
+        eye,
+        right,
+        up: cam_up,
+        forward,
+        aspect,
         view_rect,
         atlas: atlas_upload,
     }
@@ -205,7 +226,7 @@ fn fx(v: i32) -> f32 {
     v as f32 / FRAC
 }
 
-fn ensure_atlas(scratch: &mut Scratch) -> Option<(u32, Vec<u8>)> {
+fn ensure_atlas(scratch: &mut Scratch) -> Option<(u32, Vec<u8>, Vec<u8>)> {
     let key = unsafe { crate::doom::p_setup::vertexes as usize };
     let ready = scratch
         .atlas
@@ -270,6 +291,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
             break;
         };
         blit_wall(&mut pack, x, y, tex, w, h, pal);
+        blit_wall_emission(&mut pack, x, y, tex, w, h);
         atlas.tex_rects[tex as usize] = pack.rect(x, y, w, h);
     }
     if ok {
@@ -279,6 +301,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
                 break;
             };
             blit_flat(&mut pack, x, y, flat, pal);
+            blit_flat_emission(&mut pack, x, y, flat);
             atlas.flat_rects[flat as usize] = pack.rect(x, y, 64, 64);
         }
     }
@@ -298,7 +321,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
             atlas.sprite_size[lump as usize] = (w, h);
         }
     }
-    atlas.pending = Some((size as u32, pack.rgba));
+    atlas.pending = Some((size as u32, pack.rgba, pack.emit));
     ok
 }
 
@@ -326,16 +349,20 @@ struct Packer {
     y: i32,
     row_h: i32,
     rgba: Vec<u8>,
+    /// One byte per texel. 0 is dark, 128 is half, 255 is a full brightmap.
+    emit: Vec<u8>,
 }
 
 impl Packer {
     fn new(size: i32) -> Self {
+        let n = (size as usize) * (size as usize);
         Self {
             size,
             x: 0,
             y: 0,
             row_h: 0,
-            rgba: vec![0u8; (size as usize) * (size as usize) * 4],
+            rgba: vec![0u8; n * 4],
+            emit: vec![0u8; n],
         }
     }
 
@@ -377,6 +404,14 @@ impl Packer {
         self.rgba[dst..dst + 4].copy_from_slice(&rgba);
     }
 
+    fn put_emit(&mut self, x: i32, y: i32, level: u8) {
+        if x < 0 || y < 0 || x >= self.size || y >= self.size || level == 0 {
+            return;
+        }
+        let dst = y as usize * self.size as usize + x as usize;
+        self.emit[dst] = level;
+    }
+
     fn blit(&mut self, x: i32, y: i32, w: i32, h: i32, src: &[u8]) {
         for row in 0..h {
             let dst = ((y + row) as usize * self.size as usize + x as usize) * 4;
@@ -409,6 +444,19 @@ unsafe fn blit_wall(
     }
 }
 
+unsafe fn blit_wall_emission(pack: &mut Packer, x: i32, y: i32, tex: i32, w: i32, h: i32) {
+    let name = crate::doom::r_data::hw_texture_name(tex);
+    if name[0] == 0 {
+        return;
+    }
+    for row in 0..h {
+        for col in 0..w {
+            let level = crate::brightmaps::wall_level(&name, col, row, w, h);
+            pack.put_emit(x + col, y + row, level);
+        }
+    }
+}
+
 unsafe fn blit_flat(pack: &mut Packer, x: i32, y: i32, flat: i32, pal: &[(u8, u8, u8); 256]) {
     let src = W_CacheLumpNum(firstflat + flat, PU_CACHE) as *const u8;
     if src.is_null() || W_LumpLength((firstflat + flat) as u32) < 4096 {
@@ -421,6 +469,37 @@ unsafe fn blit_flat(pack: &mut Packer, x: i32, y: i32, flat: i32, pal: &[(u8, u8
             pack.put(x + col, y + row, [r, g, b, 255]);
         }
     }
+}
+
+unsafe fn blit_flat_emission(pack: &mut Packer, x: i32, y: i32, flat: i32) {
+    let name = flat_name(flat);
+    if name[0] == 0 {
+        return;
+    }
+    for row in 0..64 {
+        for col in 0..64 {
+            let level = crate::brightmaps::flat_level(&name, col, row);
+            pack.put_emit(x + col, y + row, level);
+        }
+    }
+}
+
+unsafe fn flat_name(flat: i32) -> [u8; 8] {
+    use crate::doom::w_wad::{lumpinfo, numlumps};
+    let mut out = [0u8; 8];
+    let lump = firstflat + flat;
+    if lump < 0 || lumpinfo.is_null() || (lump as u32) >= numlumps {
+        return out;
+    }
+    let name = &(*lumpinfo.add(lump as usize)).name;
+    for i in 0..8 {
+        let c = name[i] as u8;
+        if c == 0 {
+            break;
+        }
+        out[i] = c.to_ascii_uppercase();
+    }
+    out
 }
 
 /// Rasterise a Doom patch lump. Palette index 0 is transparent.
@@ -512,6 +591,7 @@ unsafe fn push_sky(
     // meets the pole. A full turn maps to 1024 sky columns.
     let radius = 6000.0;
     let repeats = 1024.0 / tw as f32;
+    let sky_start = verts.len();
     let segs_n = 48i32;
     let lats = 16i32;
     let v_of = |el: f32| (100.0 - el.to_degrees() * (100.0 / 90.0)) / th as f32;
@@ -549,6 +629,10 @@ unsafe fn push_sky(
             );
         }
     }
+    // The path tracer treats this sphere as the sky light. `_pad` is otherwise 0.
+    for v in verts.iter_mut().skip(sky_start) {
+        v._pad = 1.0;
+    }
 }
 
 unsafe fn push_world(
@@ -562,7 +646,7 @@ unsafe fn push_world(
     }
     // One quad per solid surface. The partner seg of a two-sided line faces
     // the other way and would otherwise sit on the same plane.
-    let mut drawn: HashSet<(i32, i32, i32, i32, i32, i32)> = HashSet::new();
+    let mut drawn: HashSet<WallKey> = HashSet::new();
     for i in 0..numsegs {
         let seg = &*segs.add(i as usize);
         push_seg(verts, indices, atlas, seg, &mut drawn);
@@ -579,7 +663,7 @@ unsafe fn push_seg(
     indices: &mut Vec<u32>,
     atlas: &Atlas,
     seg: &seg_t,
-    drawn: &mut HashSet<(i32, i32, i32, i32, i32, i32)>,
+    drawn: &mut HashSet<WallKey>,
 ) {
     if seg.v1.is_null()
         || seg.v2.is_null()
@@ -591,9 +675,6 @@ unsafe fn push_seg(
     }
     let v1 = &*seg.v1;
     let v2 = &*seg.v2;
-    if !seg_faces_view(v1.x, v1.y, v2.x, v2.y, viewx, viewy) {
-        return;
-    }
     let side = &*seg.sidedef;
     let line = &*seg.linedef;
     let front = &*seg.frontsector;
@@ -665,9 +746,9 @@ unsafe fn push_seg(
 
 /// True when the camera is on the front side of the directed seg.
 ///
-/// The front side is to the right of v1→v2. In world space that normal is
-/// `(dy, dx)` on the XZ plane, so the camera is in front when
-/// `dy * (viewx - x1) + dx * (y1 - viewy)` is positive.
+/// The front side is to the right of v1→v2. Kept for the facing test; the
+/// mesh itself keeps every side so lamps still cast after the camera turns.
+#[cfg(test)]
 fn seg_faces_view(x1: i32, y1: i32, x2: i32, y2: i32, cam_x: i32, cam_y: i32) -> bool {
     let dx = x2 as i64 - x1 as i64;
     let dy = y2 as i64 - y1 as i64;
@@ -675,15 +756,27 @@ fn seg_faces_view(x1: i32, y1: i32, x2: i32, y2: i32, cam_x: i32, cam_y: i32) ->
     side >= 0
 }
 
-/// Endpoints ordered so a seg and the partner seg share a key, plus the
-/// vertical span. A second quad on that surface is dropped.
-fn wall_key(v1: &vertex_t, v2: &vertex_t, z0: f32, z1: f32) -> (i32, i32, i32, i32, i32, i32) {
-    let (ax, ay, bx, by) = if (v1.x, v1.y) <= (v2.x, v2.y) {
-        (v1.x, v1.y, v2.x, v2.y)
-    } else {
+/// One quad per directed side. Opposite segs of a two-sided line do not share
+/// a key: each texture has to stay in the scene so its brightmap can light
+/// the sector it faces, even after the camera walks around the corner.
+type WallKey = (i32, i32, i32, i32, i32, i32, i32);
+
+fn wall_key(v1: &vertex_t, v2: &vertex_t, z0: f32, z1: f32) -> WallKey {
+    let swapped = (v2.x, v2.y) < (v1.x, v1.y);
+    let (ax, ay, bx, by) = if swapped {
         (v2.x, v2.y, v1.x, v1.y)
+    } else {
+        (v1.x, v1.y, v2.x, v2.y)
     };
-    (ax, ay, bx, by, z0.to_bits() as i32, z1.to_bits() as i32)
+    (
+        ax,
+        ay,
+        bx,
+        by,
+        z0.to_bits() as i32,
+        z1.to_bits() as i32,
+        i32::from(swapped),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -700,7 +793,7 @@ unsafe fn push_wall(
     tex: i32,
     origin: f32,
     light: f32,
-    drawn: &mut HashSet<(i32, i32, i32, i32, i32, i32)>,
+    drawn: &mut HashSet<WallKey>,
 ) {
     if z1 <= z0 + 0.01 {
         return;
@@ -753,9 +846,10 @@ unsafe fn push_flat(
     let sector = &*(sub.sector as *const sector_t);
     let light = (sector.lightlevel as f32 / 255.0).clamp(0.04, 1.0);
     let y_floor = fx(sector.floorheight);
+    let grown = inflate_poly(outline, 3.0);
     let floor_rect = flat_rect(atlas, sector.floorpic as i32);
     if floor_rect != [0.0; 4] {
-        fan(verts, indices, outline, y_floor, floor_rect, light);
+        fan(verts, indices, &grown, y_floor, floor_rect, light);
     }
     if sector.ceilingpic as i32 != skyflatnum {
         let ceil_rect = flat_rect(atlas, sector.ceilingpic as i32);
@@ -763,13 +857,73 @@ unsafe fn push_flat(
             fan(
                 verts,
                 indices,
-                outline,
+                &grown,
                 fx(sector.ceilingheight),
                 ceil_rect,
                 light,
             );
         }
     }
+}
+
+/// Push every edge outward so neighboring floors overlap. A shared BSP edge
+/// is one line, and a ray can slip between the two triangles there.
+fn inflate_poly(poly: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
+    let n = poly.len();
+    if n < 3 || amount <= 0.0 {
+        return poly.to_vec();
+    }
+    let mut area = 0.0;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
+    }
+    let side = if area >= 0.0 { 1.0 } else { -1.0 };
+    let mut lines = Vec::with_capacity(n);
+    for i in 0..n {
+        let a = poly[i];
+        let b = poly[(i + 1) % n];
+        let dx = b[0] - a[0];
+        let dy = b[1] - a[1];
+        let len = dx.hypot(dy).max(1e-6);
+        lines.push((
+            a[0] + side * dy / len * amount,
+            a[1] - side * dx / len * amount,
+            dx,
+            dy,
+        ));
+    }
+    let mut out = Vec::with_capacity(n);
+    for i in 0..n {
+        let prev = (i + n - 1) % n;
+        let (x1, y1, dx1, dy1) = lines[prev];
+        let (x2, y2, dx2, dy2) = lines[i];
+        let det = dx1 * dy2 - dy1 * dx2;
+        let cur = poly[i];
+        if det.abs() < 1e-6 {
+            out.push([x2, y2]);
+            continue;
+        }
+        let t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / det;
+        let p = [x1 + dx1 * t, y1 + dy1 * t];
+        let drift = (p[0] - cur[0]).hypot(p[1] - cur[1]);
+        if !drift.is_finite() || drift > amount * 4.0 {
+            let e0x = cur[0] - poly[prev][0];
+            let e0y = cur[1] - poly[prev][1];
+            let next = poly[(i + 1) % n];
+            let e1x = next[0] - cur[0];
+            let e1y = next[1] - cur[1];
+            let l0 = e0x.hypot(e0y).max(1e-6);
+            let l1 = e1x.hypot(e1y).max(1e-6);
+            let ox = side * (e0y / l0 + e1y / l1);
+            let oy = -side * (e0x / l0 + e1x / l1);
+            let ol = ox.hypot(oy).max(1e-6);
+            out.push([cur[0] + ox / ol * amount, cur[1] + oy / ol * amount]);
+        } else {
+            out.push(p);
+        }
+    }
+    out
 }
 
 fn fan(
@@ -1334,5 +1488,14 @@ mod tests {
         assert!(!seg_faces_view(x1, y1, x2, y2, 0, north));
         assert!(!seg_faces_view(x2, y2, x1, y1, 0, south));
         assert!(seg_faces_view(x2, y2, x1, y1, 0, north));
+    }
+
+    #[test]
+    fn inflated_square_overlaps_its_neighbors() {
+        let square = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+        let grown = super::inflate_poly(&square, 1.0);
+        assert_eq!(grown.len(), 4);
+        assert!(grown.iter().any(|p| p[0] < -0.5 && p[1] < -0.5));
+        assert!(grown.iter().any(|p| p[0] > 1.5 && p[1] > 1.5));
     }
 }

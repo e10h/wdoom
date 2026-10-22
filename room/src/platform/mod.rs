@@ -39,7 +39,7 @@ use web_time::Instant;
 
 use winit::event::MouseButton;
 use winit::keyboard::KeyCode;
-use winit::window::{CursorGrabMode, Window};
+use winit::window::{CursorGrabMode, Fullscreen, Window};
 
 use crate::gpu::GpuState;
 
@@ -195,7 +195,22 @@ fn capture_pointer() {
     }
 }
 
-fn release_pointer() {
+/// Borderless fullscreen on the current monitor. The green window button
+/// does the same thing once the window is resizable.
+pub fn toggle_fullscreen() {
+    WINDOW.with_borrow(|w| {
+        let Some(win) = w.as_ref() else {
+            return;
+        };
+        if win.fullscreen().is_some() {
+            win.set_fullscreen(None);
+        } else {
+            win.set_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+    });
+}
+
+pub fn release_pointer() {
     CURSOR_LOCKED.with(|c| c.set(false));
     WINDOW.with_borrow(|w| {
         if let Some(win) = w.as_ref() {
