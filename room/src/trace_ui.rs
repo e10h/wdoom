@@ -48,6 +48,7 @@ impl TraceUi {
         height: u32,
         controls: &mut TraceSettings,
         traced: (u32, u32),
+        samples: u32,
     ) {
         let input = self.state.take_egui_input(&self.window);
         self.ctx.begin_pass(input);
@@ -68,7 +69,10 @@ impl TraceUi {
                 let mut height = controls.height as i32;
                 ui.add(egui::Slider::new(&mut height, 160..=1080).text("Ray height"));
                 controls.height = height as u32;
-                ui.label(format!("Tracing {}×{}", traced.0, traced.1));
+                ui.label(format!(
+                    "Tracing {}×{}, {} accumulated",
+                    traced.0, traced.1, samples
+                ));
             });
         let output = self.ctx.end_pass();
         self.state

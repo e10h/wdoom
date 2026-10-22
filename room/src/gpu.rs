@@ -508,12 +508,26 @@ impl Default for TraceSettings {
 }
 
 struct RayImage {
+    /// This frame's path-traced sample, before it is averaged.
     _color: wgpu::Texture,
     view: wgpu::TextureView,
+    /// Running average of samples taken while the camera is still.
+    _history: wgpu::Texture,
+    /// Average including this frame. Sprites are drawn here after the copy
+    /// into history, so they do not smear across frames.
+    _combined: wgpu::Texture,
+    combined: wgpu::TextureView,
     _depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     bind: wgpu::BindGroup,
+    accum_bind: wgpu::BindGroup,
     size: (u32, u32),
+}
+
+struct AccGpu {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    uniform: wgpu::Buffer,
 }
 
 struct BlitGpu {
@@ -566,9 +580,13 @@ pub struct GpuState {
     trace: TraceSettings,
     /// Pixel size of the path-traced image last frame.
     traced: (u32, u32),
+    /// Samples already averaged into the history image.
+    accum_count: u32,
+    accum_key: Option<AccumKey>,
     /// Offscreen path-traced view, capped by [`TraceSettings::height`].
     ray_image: Option<RayImage>,
     blit: BlitGpu,
+    accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
     ui: crate::trace_ui::TraceUi,
 }
@@ -912,6 +930,7 @@ impl GpuState {
             cache: None,
         });
         let blit = create_blit(&device, surface_format);
+        let accum = create_accum(&device, surface_format);
         #[cfg(not(target_arch = "wasm32"))]
         let ui = crate::trace_ui::TraceUi::new(&device, surface_format, window);
         Ok(Self {
@@ -930,8 +949,11 @@ impl GpuState {
             ray_query,
             trace: TraceSettings::default(),
             traced: (0, 0),
+            accum_count: 0,
+            accum_key: None,
             ray_image: None,
             blit,
+            accum,
             #[cfg(not(target_arch = "wasm32"))]
             ui,
         })
@@ -1126,6 +1148,14 @@ impl GpuState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        if trace {
+            let weight = self.begin_accumulation(scene, rw, rh);
+            self.queue.write_buffer(
+                &self.accum.uniform,
+                0,
+                bytemuck::cast_slice(&[weight, 0.0, 0.0, 0.0]),
+            );
+        }
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -1172,6 +1202,77 @@ impl GpuState {
             });
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
             draw_scene(&mut pass, world, scene, true);
+            }
+            {
+            let image = self.ray_image.as_ref().expect("ray image");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("doom_ray_accum"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &image.combined,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.accum.pipeline);
+            pass.set_bind_group(0, &image.accum_bind, &[]);
+            pass.draw(0..6, 0..1);
+            }
+            let image = self.ray_image.as_ref().expect("ray image");
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &image._combined,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &image._history,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: rw,
+                    height: rh,
+                    depth_or_array_layers: 1,
+                },
+            );
+            {
+            let image = self.ray_image.as_ref().expect("ray image");
+            let world = self.world.as_ref().expect("world");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("doom_ray_sprites"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &image.combined,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &image.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
+            draw_overlays(&mut pass, world, scene);
             }
             let image = self.ray_image.as_ref().expect("ray image");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1266,21 +1367,13 @@ impl GpuState {
         {
             return;
         }
-        let color = self.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("doom_ray_color"),
-            size: wgpu::Extent3d {
-                width,
-                height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: self.config.format,
-            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            view_formats: &[],
-        });
+        let format = self.config.format;
+        let color = ray_target(&self.device, width, height, format, false);
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let history = ray_target(&self.device, width, height, format, true);
+        let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
+        let combined = ray_target(&self.device, width, height, format, true);
+        let combined_view = combined.create_view(&wgpu::TextureViewDescriptor::default());
         let (depth, depth_view) = depth_target(&self.device, width, height);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("doom_ray_blit_group"),
@@ -1288,7 +1381,7 @@ impl GpuState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
+                    resource: wgpu::BindingResource::TextureView(&combined_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -1296,14 +1389,52 @@ impl GpuState {
                 },
             ],
         });
+        let accum_bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("doom_ray_accum_group"),
+            layout: &self.accum.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&history_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.accum.uniform.as_entire_binding(),
+                },
+            ],
+        });
+        self.accum_count = 0;
+        self.accum_key = None;
         self.ray_image = Some(RayImage {
             _color: color,
             view,
+            _history: history,
+            _combined: combined,
+            combined: combined_view,
             _depth: depth,
             depth_view,
             bind,
+            accum_bind,
             size: (width, height),
         });
+    }
+
+    /// `true` when this frame continues the running average. A camera or
+    /// lighting change starts the average over.
+    fn begin_accumulation(&mut self, scene: &crate::hw::Scene, width: u32, height: u32) -> f32 {
+        let key = AccumKey::now(scene, &self.trace, width, height);
+        let still = self.accum_key.as_ref().is_some_and(|prev| prev.same(&key));
+        if !still {
+            self.accum_count = 0;
+            self.accum_key = Some(key);
+        }
+        let weight = 1.0 / (self.accum_count + 1) as f32;
+        self.accum_count += 1;
+        weight
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -1316,6 +1447,7 @@ impl GpuState {
                 config,
                 trace,
                 traced,
+                accum_count,
                 ..
             } = self;
             ui.paint(
@@ -1327,6 +1459,7 @@ impl GpuState {
                 config.height,
                 trace,
                 *traced,
+                *accum_count,
             );
         }
         #[cfg(target_arch = "wasm32")]
@@ -1775,6 +1908,196 @@ fn fs_blit(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
+fn ray_target(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+    format: wgpu::TextureFormat,
+    copy: bool,
+) -> wgpu::Texture {
+    let mut usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
+    if copy {
+        usage |= wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST;
+    }
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("doom_ray_target"),
+        size: wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage,
+        view_formats: &[],
+    })
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct AccumKey {
+    eye: [f32; 3],
+    right: [f32; 3],
+    up: [f32; 3],
+    forward: [f32; 3],
+    light: [f32; 4],
+    size: [f32; 2],
+}
+
+impl AccumKey {
+    fn now(scene: &crate::hw::Scene, trace: &TraceSettings, width: u32, height: u32) -> Self {
+        Self {
+            eye: scene.eye,
+            right: scene.right,
+            up: scene.up,
+            forward: scene.forward,
+            light: [
+                trace.emission,
+                trace.environment,
+                trace.bounces as f32,
+                trace.height as f32,
+            ],
+            size: [width as f32, height as f32],
+        }
+    }
+
+    fn same(&self, other: &Self) -> bool {
+        let a = bytemuck::bytes_of(self);
+        let b = bytemuck::bytes_of(other);
+        a.chunks(4).zip(b.chunks(4)).all(|(x, y)| {
+            let x = f32::from_le_bytes(x.try_into().unwrap());
+            let y = f32::from_le_bytes(y.try_into().unwrap());
+            (x - y).abs() <= 1e-4
+        })
+    }
+}
+
+const ACC_SHADER: &str = r#"
+struct VertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+};
+
+struct AccWeight {
+    weight: f32,
+};
+
+@group(0) @binding(0) var sample_tex: texture_2d<f32>;
+@group(0) @binding(1) var history_tex: texture_2d<f32>;
+@group(0) @binding(2) var<uniform> acc: AccWeight;
+
+@vertex
+fn vs_acc(@builtin(vertex_index) vi: u32) -> VertexOutput {
+    var positions = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0),
+    );
+    var out: VertexOutput;
+    out.clip_position = vec4<f32>(positions[vi], 0.0, 1.0);
+    return out;
+}
+
+@fragment
+fn fs_acc(@builtin(position) frag: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(frag.xy);
+    let fresh = textureLoad(sample_tex, p, 0);
+    let old = textureLoad(history_tex, p, 0);
+    return vec4<f32>(mix(old.rgb, fresh.rgb, acc.weight), 1.0);
+}
+"#;
+
+fn create_accum(device: &wgpu::Device, format: wgpu::TextureFormat) -> AccGpu {
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("doom_ray_accum_shader"),
+        source: wgpu::ShaderSource::Wgsl(ACC_SHADER.into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("doom_ray_accum_layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("doom_ray_accum_pipeline_layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("doom_ray_accum_pipeline"),
+        layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &shader,
+            entry_point: Some("vs_acc"),
+            buffers: &[],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &shader,
+            entry_point: Some("fs_acc"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: wgpu::PipelineCompilationOptions::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    });
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("doom_ray_accum_weight"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    AccGpu {
+        pipeline,
+        layout,
+        uniform,
+    }
+}
+
 fn ray_extent(view_w: f32, view_h: f32, max_h: u32) -> (u32, u32) {
     let view_w = view_w.max(1.0);
     let view_h = view_h.max(1.0);
@@ -1804,16 +2127,32 @@ fn draw_scene<'a>(
         pass.set_pipeline(&ray.pipeline);
         pass.set_bind_group(0, &ray.bind_group, &[]);
         pass.draw(0..6, 0..1);
-        let sprites = scene.opaque_indices.min(world_n);
-        if world_n > sprites {
-            pass.set_pipeline(&world.pipeline);
-            pass.set_bind_group(0, &world.bind_group, &[]);
-            pass.draw_indexed(sprites..world_n, 0, 0..1);
-        }
     } else if world_n > 0 {
         pass.set_pipeline(&world.pipeline);
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(0..world_n, 0, 0..1);
+    }
+    if !trace && total > world_n {
+        pass.set_pipeline(&world.weapon_pipeline);
+        pass.set_bind_group(0, &world.bind_group, &[]);
+        pass.draw_indexed(world_n..total, 0, 0..1);
+    }
+}
+
+fn draw_overlays<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    world: &'a WorldGpu,
+    scene: &crate::hw::Scene,
+) {
+    pass.set_vertex_buffer(0, world.vertices.slice(..));
+    pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
+    let world_n = scene.world_indices.min(scene.indices.len() as u32);
+    let total = scene.indices.len() as u32;
+    let sprites = scene.opaque_indices.min(world_n);
+    if world_n > sprites {
+        pass.set_pipeline(&world.pipeline);
+        pass.set_bind_group(0, &world.bind_group, &[]);
+        pass.draw_indexed(sprites..world_n, 0, 0..1);
     }
     if total > world_n {
         pass.set_pipeline(&world.weapon_pipeline);

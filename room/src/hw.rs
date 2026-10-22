@@ -846,10 +846,9 @@ unsafe fn push_flat(
     let sector = &*(sub.sector as *const sector_t);
     let light = (sector.lightlevel as f32 / 255.0).clamp(0.04, 1.0);
     let y_floor = fx(sector.floorheight);
-    let grown = inflate_poly(outline, 3.0);
     let floor_rect = flat_rect(atlas, sector.floorpic as i32);
     if floor_rect != [0.0; 4] {
-        fan(verts, indices, &grown, y_floor, floor_rect, light);
+        fan(verts, indices, outline, y_floor, floor_rect, light);
     }
     if sector.ceilingpic as i32 != skyflatnum {
         let ceil_rect = flat_rect(atlas, sector.ceilingpic as i32);
@@ -857,73 +856,13 @@ unsafe fn push_flat(
             fan(
                 verts,
                 indices,
-                &grown,
+                outline,
                 fx(sector.ceilingheight),
                 ceil_rect,
                 light,
             );
         }
     }
-}
-
-/// Push every edge outward so neighboring floors overlap. A shared BSP edge
-/// is one line, and a ray can slip between the two triangles there.
-fn inflate_poly(poly: &[[f32; 2]], amount: f32) -> Vec<[f32; 2]> {
-    let n = poly.len();
-    if n < 3 || amount <= 0.0 {
-        return poly.to_vec();
-    }
-    let mut area = 0.0;
-    for i in 0..n {
-        let j = (i + 1) % n;
-        area += poly[i][0] * poly[j][1] - poly[j][0] * poly[i][1];
-    }
-    let side = if area >= 0.0 { 1.0 } else { -1.0 };
-    let mut lines = Vec::with_capacity(n);
-    for i in 0..n {
-        let a = poly[i];
-        let b = poly[(i + 1) % n];
-        let dx = b[0] - a[0];
-        let dy = b[1] - a[1];
-        let len = dx.hypot(dy).max(1e-6);
-        lines.push((
-            a[0] + side * dy / len * amount,
-            a[1] - side * dx / len * amount,
-            dx,
-            dy,
-        ));
-    }
-    let mut out = Vec::with_capacity(n);
-    for i in 0..n {
-        let prev = (i + n - 1) % n;
-        let (x1, y1, dx1, dy1) = lines[prev];
-        let (x2, y2, dx2, dy2) = lines[i];
-        let det = dx1 * dy2 - dy1 * dx2;
-        let cur = poly[i];
-        if det.abs() < 1e-6 {
-            out.push([x2, y2]);
-            continue;
-        }
-        let t = ((x2 - x1) * dy2 - (y2 - y1) * dx2) / det;
-        let p = [x1 + dx1 * t, y1 + dy1 * t];
-        let drift = (p[0] - cur[0]).hypot(p[1] - cur[1]);
-        if !drift.is_finite() || drift > amount * 4.0 {
-            let e0x = cur[0] - poly[prev][0];
-            let e0y = cur[1] - poly[prev][1];
-            let next = poly[(i + 1) % n];
-            let e1x = next[0] - cur[0];
-            let e1y = next[1] - cur[1];
-            let l0 = e0x.hypot(e0y).max(1e-6);
-            let l1 = e1x.hypot(e1y).max(1e-6);
-            let ox = side * (e0y / l0 + e1y / l1);
-            let oy = -side * (e0x / l0 + e1x / l1);
-            let ol = ox.hypot(oy).max(1e-6);
-            out.push([cur[0] + ox / ol * amount, cur[1] + oy / ol * amount]);
-        } else {
-            out.push(p);
-        }
-    }
-    out
 }
 
 fn fan(
@@ -1488,14 +1427,5 @@ mod tests {
         assert!(!seg_faces_view(x1, y1, x2, y2, 0, north));
         assert!(!seg_faces_view(x2, y2, x1, y1, 0, south));
         assert!(seg_faces_view(x2, y2, x1, y1, 0, north));
-    }
-
-    #[test]
-    fn inflated_square_overlaps_its_neighbors() {
-        let square = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
-        let grown = super::inflate_poly(&square, 1.0);
-        assert_eq!(grown.len(), 4);
-        assert!(grown.iter().any(|p| p[0] < -0.5 && p[1] < -0.5));
-        assert!(grown.iter().any(|p| p[0] > 1.5 && p[1] > 1.5));
     }
 }
