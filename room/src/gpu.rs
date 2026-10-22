@@ -603,7 +603,7 @@ impl Default for TraceSettings {
     fn default() -> Self {
         Self {
             emission: 40.0,
-            environment: 3.2,
+            environment: 1.0,
             bounces: 2,
             height: 720,
             world_space: true,
@@ -1272,10 +1272,10 @@ impl GpuState {
             if world_space {
                 if let Some(world) = self.world.as_ref() {
                     let params = BinParams {
-                        screen_w: screen_weight,
                         pixels: rw * rh,
                         light_size: crate::hw::LIGHTMAP_SIZE,
                         slots: LIGHT_SLOTS,
+                        _pad: 0,
                     };
                     self.queue.write_buffer(
                         &world.light_bins.uniform,
@@ -2836,10 +2836,10 @@ struct LightBins {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct BinParams {
-    screen_w: f32,
     pixels: u32,
     light_size: u32,
     slots: u32,
+    _pad: u32,
 }
 
 const LIGHT_BIN_SHADER: &str = r#"
@@ -2851,10 +2851,10 @@ struct LightHit {
 }
 
 struct BinParams {
-    screen_w: f32,
     pixels: u32,
     light_size: u32,
     slots: u32,
+    _pad: u32,
 }
 
 @group(0) @binding(0) var<storage, read> light_hits: array<LightHit>;
@@ -2925,13 +2925,12 @@ fn cs_save(@builtin(global_invocation_id) id: vec3<u32>) {
         f32(atomicLoad(&bins[base + 3u])) / scale / f32(n),
     );
     let old = textureLoad(light_read, coord, 0);
-    // Turning the camera keeps a texel that already has light. An empty texel
-    // takes this frame. Holding still blends the texel toward the pixels on it.
-    if (old.a > 0.0 && params.screen_w >= 0.999) {
-        return;
-    }
-    let saved = select(avg, mix(old.rgb, avg, params.screen_w), old.a > 0.0);
-    textureStore(light_write, coord, vec4<f32>(saved, 1.0));
+    // Every look at this texel adds one sample, whether the camera moved or not.
+    // Walking the room keeps filling surfaces in.
+    let count = min(old.a, 1024.0);
+    let weight = 1.0 / (count + 1.0);
+    let saved = mix(old.rgb, avg, weight);
+    textureStore(light_write, coord, vec4<f32>(saved, min(count + 1.0, 1024.0)));
 }
 "#;
 
