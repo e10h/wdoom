@@ -220,6 +220,7 @@ struct RayCam {
     forward: vec4<f32>,
     viewport: vec4<f32>,
     // x: emissive scale, y: environment scale, z: bounce count.
+    // w: 1 stores light on the surface, 0 averages the screen instead.
     light: vec4<f32>,
 };
 
@@ -241,9 +242,13 @@ struct Surf {
     sky: bool,
     alpha: f32,
     hit: bool,
+    // Albedo atlas coordinate. `light_uv` is this surface's own light texel,
+    // unique to that placed wall or floor. Negative means it is not stored.
+    atlas_uv: vec2<f32>,
+    light_uv: vec2<f32>,
 };
 
-const VERTEX_FLOATS: u32 = 14u;
+const VERTEX_FLOATS: u32 = 16u;
 const FORCE_OPAQUE: u32 = 1u;
 const SAMPLES: u32 = 4u;
 const MAX_BOUNCES: i32 = 8;
@@ -260,6 +265,17 @@ const SUN_RGB = vec3<f32>(2.4, 2.25, 2.0);
 @group(0) @binding(5) var<storage, read> indices: array<u32>;
 @group(0) @binding(6) var emit_tex: texture_2d<f32>;
 @group(0) @binding(7) var emit_samp: sampler;
+// Settled incoming light per surface texel. The pass reads it and shows it.
+@group(0) @binding(8) var light_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(9) var light_read: texture_2d<f32>;
+// One fresh sample per screen pixel, binned into the texel it hit.
+struct LightHit {
+    r: f32,
+    g: f32,
+    b: f32,
+    packed: u32,
+}
+@group(0) @binding(10) var<storage, read_write> light_hits: array<LightHit>;
 
 @vertex
 fn vs_ray(@builtin(vertex_index) vi: u32) -> VertexOutput {
@@ -338,6 +354,8 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     surf.sky = false;
     surf.alpha = 0.0;
     surf.hit = false;
+    surf.atlas_uv = vec2<f32>(0.0);
+    surf.light_uv = vec2<f32>(-1.0);
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
         return surf;
     }
@@ -375,7 +393,42 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     surf.sky = bary_mix(i0, i1, i2, 13u, b) > 0.5;
     surf.alpha = tex.a;
     surf.hit = true;
+    surf.atlas_uv = atlas_uv;
+    surf.light_uv = vec2<f32>(
+        bary_mix(i0, i1, i2, 14u, b),
+        bary_mix(i0, i1, i2, 15u, b),
+    );
     return surf;
+}
+
+// A soft beam from the camera. `cam.up.w` is its strength. The shadow ray is
+// skipped for the surface we can already see.
+fn flashlight(pos: vec3<f32>, n: vec3<f32>, check_shadow: bool) -> vec3<f32> {
+    let amount = cam.up.w;
+    if (amount <= 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let to_eye = cam.origin_aspect.xyz - pos;
+    let dist2 = dot(to_eye, to_eye);
+    if (dist2 < 1.0) {
+        return vec3<f32>(0.0);
+    }
+    let dist = sqrt(dist2);
+    let l = to_eye / dist;
+    let ndl = max(dot(n, l), 0.0);
+    let spot = max(dot(-l, cam.forward.xyz), 0.0);
+    let cone = spot * spot * spot * spot;
+    if (ndl <= 0.0 || cone <= 0.001) {
+        return vec3<f32>(0.0);
+    }
+    if (check_shadow) {
+        let blocker = trace(pos + n * RAY_BIAS, l);
+        if (blocker.hit && !blocker.sky && distance(blocker.pos, pos) + 0.5 < dist) {
+            return vec3<f32>(0.0);
+        }
+    }
+    let falloff = 1.0 / (1.0 + dist2 * 0.00002);
+    return vec3<f32>(1.0, 0.96, 0.88) * amount * ndl * cone * falloff;
 }
 
 // One shadow ray. The sky sphere is the only thing that counts as the sun.
@@ -414,9 +467,9 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
         return FragOut(depth, vec4<f32>(primary.albedo, 1.0));
     }
 
-    // The sun and the sky light every surface that can see them. Brightmap
-    // masks add the authored lamps. Sector brightness is not a light.
-    var radiance = vec3<f32>(0.0);
+    // Incoming light only. The texture stays at full resolution and is
+    // applied after the light map is read.
+    var incoming = vec3<f32>(0.0);
     let frame = u32(cam.right.w);
     let px = u32(frag.x) + u32(frag.y) * 4096u;
     let emit_scale = cam.light.x;
@@ -432,26 +485,35 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                 break;
             }
             if (surf.sky) {
-                radiance += throughput * sky_light(dir) * env_scale;
+                incoming += throughput * sky_light(dir) * env_scale;
                 break;
             }
-            if (surf.emit > 0.0) {
-                radiance += throughput * surf.albedo * surf.emit * emit_scale;
+            // The surface we see keeps its own texel. Later hits contribute
+            // their color into the light arriving here.
+            let shade = select(vec3<f32>(1.0), surf.albedo, bounce > 0);
+            if (bounce > 0 && surf.emit > 0.0) {
+                incoming += throughput * surf.albedo * surf.emit * emit_scale;
             }
             let ndl = sun_ndotl(surf.pos, surf.n);
             if (ndl > 0.0) {
-                radiance += throughput * surf.albedo * SUN_RGB * ndl * env_scale;
+                incoming += throughput * shade * SUN_RGB * ndl * env_scale;
             }
             // Open sky above this point. Floors take most of it; walls take a little.
             let above = trace(surf.pos + surf.n * RAY_BIAS, vec3<f32>(0.0, 1.0, 0.0));
             if (above.sky) {
                 let facing = max(surf.n.y, 0.0) * 0.5 + 0.25;
-                radiance += throughput * surf.albedo * sky_light(vec3<f32>(0.0, 1.0, 0.0)) * facing * env_scale;
+                incoming += throughput * shade * sky_light(vec3<f32>(0.0, 1.0, 0.0)) * facing * env_scale;
+            }
+            let beam = flashlight(surf.pos, surf.n, bounce > 0);
+            if (beam.x > 0.0) {
+                incoming += throughput * shade * beam;
             }
             if (bounce + 1 >= bounce_limit) {
                 break;
             }
-            throughput = throughput * surf.albedo;
+            if (bounce > 0) {
+                throughput = throughput * surf.albedo;
+            }
             dir = hemisphere(surf.n, &rng);
             let next = trace(surf.pos + surf.n * RAY_BIAS, dir);
             if (!next.hit || next.alpha < 0.5) {
@@ -460,7 +522,36 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
             surf = next;
         }
     }
-    radiance = radiance / f32(SAMPLES);
+    incoming = incoming / f32(SAMPLES);
+    // Every screen pixel that lands on a texel is recorded. A later pass
+    // averages those pixels into the one texel. The picture is that texel,
+    // so light does not vary inside it.
+    if (cam.light.w > 0.5 && primary.light_uv.x >= 0.0) {
+        let dims = textureDimensions(light_read);
+        let coord = clamp(
+            vec2<i32>(primary.light_uv * vec2<f32>(dims)),
+            vec2<i32>(0),
+            vec2<i32>(dims) - vec2<i32>(1),
+        );
+        let texel = u32(coord.y) * u32(dims.x) + u32(coord.x);
+        let pix = u32(frag.x) + u32(frag.y) * u32(cam.viewport.z);
+        if (pix < arrayLength(&light_hits)) {
+            light_hits[pix].r = incoming.r;
+            light_hits[pix].g = incoming.g;
+            light_hits[pix].b = incoming.b;
+            light_hits[pix].packed = texel + 1u;
+        }
+        let old = textureLoad(light_read, coord, 0);
+        if (old.a > 0.0) {
+            incoming = old.rgb;
+        }
+    }
+    let shaded = primary.albedo * incoming;
+    let glow = primary.albedo * primary.emit * emit_scale;
+    // The photons above still leave at full strength. On this surface the
+    // glow is blended halfway with the texture, so the pattern stays visible.
+    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
+    let radiance = mix(shaded, hot, select(0.0, 0.5, primary.emit > 0.0));
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
 "#;
@@ -468,6 +559,14 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
 struct WorldGpu {
     atlas: wgpu::Texture,
     emission: wgpu::Texture,
+    /// Settled radiance on the atlas texels, sampled by the ray pass.
+    light: wgpu::Texture,
+    /// This frame's updated copy of `light`. Copied back after the pass.
+    light_write: wgpu::Texture,
+    /// Fresh incoming light, one record per ray-target pixel.
+    light_hits: wgpu::Buffer,
+    /// Adds every pixel on a texel into that texel, then writes the average.
+    light_bins: LightBins,
     atlas_size: u32,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
@@ -494,6 +593,10 @@ pub(crate) struct TraceSettings {
     pub(crate) bounces: i32,
     /// Tallest path-traced image, in pixels. 720 is 720p for a 16:9 view.
     pub(crate) height: u32,
+    /// Light is stored on the surfaces. Off, it only builds up on the screen.
+    pub(crate) world_space: bool,
+    /// Beam from the camera. World mode leaves it on the surfaces it hits.
+    pub(crate) flashlight: f32,
 }
 
 impl Default for TraceSettings {
@@ -503,6 +606,8 @@ impl Default for TraceSettings {
             environment: 3.2,
             bounces: 2,
             height: 720,
+            world_space: true,
+            flashlight: 2.0,
         }
     }
 }
@@ -1101,6 +1206,11 @@ impl GpuState {
             .as_ref()
             .map(|(size, rgba, emit)| (*size, rgba.as_slice(), emit.as_slice()));
         self.ensure_world(atlas);
+        if scene.light_reset {
+            if let Some(world) = &self.world {
+                clear_light(&self.queue, &world.light, crate::hw::LIGHTMAP_SIZE);
+            }
+        }
         let rect = scene.view_rect;
         let surf_w = self.config.width as f32;
         let surf_h = self.config.height as f32;
@@ -1115,7 +1225,8 @@ impl GpuState {
         }
         let (rw, rh) = ray_extent(vw, vh, self.trace.height);
         self.traced = (rw, rh);
-        let trace = self.prepare_rays(scene, 0.0, 0.0, rw as f32, rh as f32);
+        let screen_weight = self.begin_accumulation(scene, rw, rh);
+        let trace = self.prepare_rays(scene, 0.0, 0.0, rw as f32, rh as f32, screen_weight);
         if trace {
             self.ensure_ray_image(rw, rh);
         } else if let Some(world) = self.world.as_mut() {
@@ -1148,13 +1259,31 @@ impl GpuState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
+        let world_space = self.trace.world_space;
         if trace {
-            let weight = self.begin_accumulation(scene, rw, rh);
+            // World mode shows the texel. The screen average would keep a
+            // separate value in every pixel of that texel.
+            let image_weight = if world_space { 1.0 } else { screen_weight };
             self.queue.write_buffer(
                 &self.accum.uniform,
                 0,
-                bytemuck::cast_slice(&[weight, 0.0, 0.0, 0.0]),
+                bytemuck::cast_slice(&[image_weight, 0.0, 0.0, 0.0]),
             );
+            if world_space {
+                if let Some(world) = self.world.as_ref() {
+                    let params = BinParams {
+                        screen_w: screen_weight,
+                        pixels: rw * rh,
+                        light_size: crate::hw::LIGHTMAP_SIZE,
+                        slots: LIGHT_SLOTS,
+                    };
+                    self.queue.write_buffer(
+                        &world.light_bins.uniform,
+                        0,
+                        bytemuck::bytes_of(&params),
+                    );
+                }
+            }
         }
         let mut encoder = self
             .device
@@ -1164,6 +1293,16 @@ impl GpuState {
 
         if trace {
             if let Some(world) = self.world.as_mut() {
+                if world_space {
+                    copy_light(
+                        &mut encoder,
+                        &world.light,
+                        &world.light_write,
+                        crate::hw::LIGHTMAP_SIZE,
+                    );
+                    encoder.clear_buffer(&world.light_hits, 0, None);
+                    encoder.clear_buffer(&world.light_bins.bins, 0, None);
+                }
                 build_rays(world, scene, &mut encoder);
             }
         }
@@ -1202,6 +1341,34 @@ impl GpuState {
             });
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
             draw_scene(&mut pass, world, scene, true);
+            }
+            if world_space {
+                if let Some(world) = self.world.as_ref() {
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("doom_light_bin"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&world.light_bins.bin_pipeline);
+                        pass.set_bind_group(0, &world.light_bins.bind, &[]);
+                        pass.dispatch_workgroups((rw * rh + 63) / 64, 1, 1);
+                    }
+                    {
+                        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                            label: Some("doom_light_save"),
+                            timestamp_writes: None,
+                        });
+                        pass.set_pipeline(&world.light_bins.save_pipeline);
+                        pass.set_bind_group(0, &world.light_bins.bind, &[]);
+                        pass.dispatch_workgroups(LIGHT_SLOTS / 256, 1, 1);
+                    }
+                    copy_light(
+                        &mut encoder,
+                        &world.light_write,
+                        &world.light,
+                        crate::hw::LIGHTMAP_SIZE,
+                    );
+                }
             }
             {
             let image = self.ray_image.as_ref().expect("ray image");
@@ -1503,12 +1670,13 @@ impl GpuState {
         vy: f32,
         vw: f32,
         vh: f32,
+        screen_weight: f32,
     ) -> bool {
         let light = [
             self.trace.emission,
             self.trace.environment,
             self.trace.bounces as f32,
-            0.0,
+            if self.trace.world_space { 1.0 } else { 0.0 },
         ];
         let GpuState {
             world: Some(world),
@@ -1537,8 +1705,13 @@ impl GpuState {
             view_proj: scene.view_proj,
             origin_aspect: [scene.eye[0], scene.eye[1], scene.eye[2], scene.aspect],
             right: [scene.right[0], scene.right[1], scene.right[2], frame],
-            up: [scene.up[0], scene.up[1], scene.up[2], 0.0],
-            forward: [scene.forward[0], scene.forward[1], scene.forward[2], 0.0],
+            up: [scene.up[0], scene.up[1], scene.up[2], self.trace.flashlight],
+            forward: [
+                scene.forward[0],
+                scene.forward[1],
+                scene.forward[2],
+                screen_weight,
+            ],
             viewport: [vx, vy, vw, vh],
             light,
         };
@@ -1571,6 +1744,7 @@ impl GpuState {
                     depth_or_array_layers: 1,
                 },
             );
+            clear_light(&self.queue, &world.light, crate::hw::LIGHTMAP_SIZE);
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &world.emission,
@@ -1815,9 +1989,19 @@ impl GpuState {
             usage: index_usage,
             mapped_at_creation: false,
         });
+        let light = world_light_read(&self.device, crate::hw::LIGHTMAP_SIZE);
+        let light_write = world_light_write(&self.device, crate::hw::LIGHTMAP_SIZE);
+        clear_light(&self.queue, &light, crate::hw::LIGHTMAP_SIZE);
+        let light_hits = light_hit_buffer(&self.device, LIGHT_HIT_CAP);
+        let light_bins = create_light_bins(&self.device, &light, &light_write, &light_hits)
+            .expect("light bin pipelines");
         self.world = Some(WorldGpu {
             atlas: atlas_tex,
             emission: emission_tex,
+            light,
+            light_write,
+            light_hits,
+            light_bins,
             atlas_size: size,
             bind_group,
             pipeline,
@@ -1956,7 +2140,7 @@ struct AccumKey {
     up: [f32; 3],
     forward: [f32; 3],
     light: [f32; 4],
-    size: [f32; 2],
+    size: [f32; 4],
 }
 
 impl AccumKey {
@@ -1972,7 +2156,7 @@ impl AccumKey {
                 trace.bounces as f32,
                 trace.height as f32,
             ],
-            size: [width as f32, height as f32],
+            size: [width as f32, height as f32, trace.flashlight, 0.0],
         }
     }
 
@@ -2313,7 +2497,7 @@ fn upload_mesh(
 }
 
 /// Packed [`crate::hw::Vertex`] size. The ray shader reads 14 floats per vertex.
-const VERTEX_STRIDE: u64 = 56;
+const VERTEX_STRIDE: u64 = 64;
 const _: () = assert!(std::mem::size_of::<crate::hw::Vertex>() as u64 == VERTEX_STRIDE);
 
 const IDENTITY_3X4: [f32; 12] = [1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
@@ -2330,7 +2514,7 @@ struct RayUniform {
     up: [f32; 4],
     forward: [f32; 4],
     viewport: [f32; 4],
-    /// x: emissive scale, y: environment scale, z: bounce count.
+    /// x: emissive scale, y: environment scale, z: bounce count, w: world light.
     light: [f32; 4],
 }
 
@@ -2401,8 +2585,11 @@ fn sync_ray(
         &uniform,
         &world.atlas,
         &world.emission,
+        &world.light,
+        &world.light_write,
         &world.vertices,
         &world.indices,
+        &world.light_hits,
         &tlas,
     );
     world.ray = Some(RayGpu {
@@ -2481,6 +2668,36 @@ fn create_ray_pipeline(
                 ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::NonFiltering),
                 count: None,
             },
+            wgpu::BindGroupLayoutEntry {
+                binding: 8,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 9,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 10,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
         ],
     });
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
@@ -2543,18 +2760,370 @@ fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
     }
 }
 
+fn clear_light(queue: &wgpu::Queue, light: &wgpu::Texture, size: u32) {
+    let side = size.max(1) as usize;
+    let row = side * 8;
+    let stride = row.div_ceil(256) * 256;
+    let zeros = vec![0u8; stride * side];
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: light,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &zeros,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(stride as u32),
+            rows_per_image: Some(side as u32),
+        },
+        light_extent(size),
+    );
+}
+
+fn light_extent(size: u32) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: size.max(1),
+        height: size.max(1),
+        depth_or_array_layers: 1,
+    }
+}
+
+fn world_light_read(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("doom_world_light"),
+        size: light_extent(size),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+fn world_light_write(device: &wgpu::Device, size: u32) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("doom_world_light_write"),
+        size: light_extent(size),
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba16Float,
+        usage: wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    })
+}
+
+/// Ray targets never exceed 1080p at 16:9.
+const LIGHT_HIT_CAP: u64 = 1920 * 1080;
+/// Open-addressed table. Big enough that every ray pixel can land in its own slot.
+const LIGHT_SLOTS: u32 = 1 << 22;
+
+struct LightBins {
+    bins: wgpu::Buffer,
+    uniform: wgpu::Buffer,
+    bind: wgpu::BindGroup,
+    bin_pipeline: wgpu::ComputePipeline,
+    save_pipeline: wgpu::ComputePipeline,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct BinParams {
+    screen_w: f32,
+    pixels: u32,
+    light_size: u32,
+    slots: u32,
+}
+
+const LIGHT_BIN_SHADER: &str = r#"
+struct LightHit {
+    r: f32,
+    g: f32,
+    b: f32,
+    packed: u32,
+}
+
+struct BinParams {
+    screen_w: f32,
+    pixels: u32,
+    light_size: u32,
+    slots: u32,
+}
+
+@group(0) @binding(0) var<storage, read> light_hits: array<LightHit>;
+@group(0) @binding(1) var<storage, read_write> bins: array<atomic<u32>>;
+@group(0) @binding(2) var light_read: texture_2d<f32>;
+@group(0) @binding(3) var light_write: texture_storage_2d<rgba16float, write>;
+@group(0) @binding(4) var<uniform> params: BinParams;
+
+fn hash_texel(x: u32) -> u32 {
+    var h = x * 0x9e3779b9u;
+    h = h ^ (h >> 16u);
+    h = h * 0x85ebca6bu;
+    h = h ^ (h >> 13u);
+    return h;
+}
+
+@compute @workgroup_size(64)
+fn cs_bin(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= params.pixels) {
+        return;
+    }
+    let hit = light_hits[i];
+    if (hit.packed == 0u) {
+        return;
+    }
+    let mask = params.slots - 1u;
+    var slot = hash_texel(hit.packed) & mask;
+    let add_r = u32(clamp(hit.r, 0.0, 65535.0) * 64.0);
+    let add_g = u32(clamp(hit.g, 0.0, 65535.0) * 64.0);
+    let add_b = u32(clamp(hit.b, 0.0, 65535.0) * 64.0);
+    for (var probe = 0u; probe < 128u; probe = probe + 1u) {
+        let at = slot * 5u;
+        let found = atomicCompareExchangeWeak(&bins[at], 0u, hit.packed);
+        if (found.exchanged || found.old_value == hit.packed) {
+            atomicAdd(&bins[at + 1u], add_r);
+            atomicAdd(&bins[at + 2u], add_g);
+            atomicAdd(&bins[at + 3u], add_b);
+            atomicAdd(&bins[at + 4u], 1u);
+            return;
+        }
+        slot = (slot + 1u) & mask;
+    }
+}
+
+@compute @workgroup_size(256)
+fn cs_save(@builtin(global_invocation_id) id: vec3<u32>) {
+    let slot = id.x;
+    if (slot >= params.slots) {
+        return;
+    }
+    let base = slot * 5u;
+    let packed = atomicLoad(&bins[base]);
+    if (packed == 0u) {
+        return;
+    }
+    let n = atomicLoad(&bins[base + 4u]);
+    if (n == 0u) {
+        return;
+    }
+    let texel = packed - 1u;
+    let side = params.light_size;
+    let coord = vec2<i32>(i32(texel % side), i32(texel / side));
+    let scale = 64.0;
+    let avg = vec3<f32>(
+        f32(atomicLoad(&bins[base + 1u])) / scale / f32(n),
+        f32(atomicLoad(&bins[base + 2u])) / scale / f32(n),
+        f32(atomicLoad(&bins[base + 3u])) / scale / f32(n),
+    );
+    let old = textureLoad(light_read, coord, 0);
+    // Turning the camera keeps a texel that already has light. An empty texel
+    // takes this frame. Holding still blends the texel toward the pixels on it.
+    if (old.a > 0.0 && params.screen_w >= 0.999) {
+        return;
+    }
+    let saved = select(avg, mix(old.rgb, avg, params.screen_w), old.a > 0.0);
+    textureStore(light_write, coord, vec4<f32>(saved, 1.0));
+}
+"#;
+
+fn light_hit_buffer(device: &wgpu::Device, pixels: u64) -> wgpu::Buffer {
+    device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("doom_light_hits"),
+        size: pixels.max(1) * 16,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    })
+}
+
+fn create_light_bins(
+    device: &wgpu::Device,
+    light: &wgpu::Texture,
+    light_write: &wgpu::Texture,
+    hits: &wgpu::Buffer,
+) -> Result<LightBins, String> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("doom_light_bin_shader"),
+        source: wgpu::ShaderSource::Wgsl(LIGHT_BIN_SHADER.into()),
+    });
+    let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+        label: Some("doom_light_bin_layout"),
+        entries: &[
+            wgpu::BindGroupLayoutEntry {
+                binding: 0,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: true },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 1,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Storage { read_only: false },
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 2,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 3,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::StorageTexture {
+                    access: wgpu::StorageTextureAccess::WriteOnly,
+                    format: wgpu::TextureFormat::Rgba16Float,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 4,
+                visibility: wgpu::ShaderStages::COMPUTE,
+                ty: wgpu::BindingType::Buffer {
+                    ty: wgpu::BufferBindingType::Uniform,
+                    has_dynamic_offset: false,
+                    min_binding_size: None,
+                },
+                count: None,
+            },
+        ],
+    });
+    let bins = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("doom_light_bins"),
+        size: u64::from(LIGHT_SLOTS) * 5 * 4,
+        usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("doom_light_bin_params"),
+        size: 16,
+        usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
+    let light_view = light.create_view(&wgpu::TextureViewDescriptor::default());
+    let light_write_view = light_write.create_view(&wgpu::TextureViewDescriptor::default());
+    let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("doom_light_bin_group"),
+        layout: &layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: hits.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: bins.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: wgpu::BindingResource::TextureView(&light_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 3,
+                resource: wgpu::BindingResource::TextureView(&light_write_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 4,
+                resource: uniform.as_entire_binding(),
+            },
+        ],
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("doom_light_bin_pipeline_layout"),
+        bind_group_layouts: &[Some(&layout)],
+        immediate_size: 0,
+    });
+    let bin_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("doom_light_bin"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("cs_bin"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let save_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("doom_light_save"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("cs_save"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
+    let _ = device.poll(wgpu::PollType::wait_indefinitely());
+    if let Some(err) = pollster::block_on(scope.pop()) {
+        return Err(err.to_string());
+    }
+    Ok(LightBins {
+        bins,
+        uniform,
+        bind,
+        bin_pipeline,
+        save_pipeline,
+    })
+}
+
+fn copy_light(
+    encoder: &mut wgpu::CommandEncoder,
+    src: &wgpu::Texture,
+    dst: &wgpu::Texture,
+    size: u32,
+) {
+    encoder.copy_texture_to_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: src,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyTextureInfo {
+            texture: dst,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        light_extent(size),
+    );
+}
+
 fn ray_bind_group(
     device: &wgpu::Device,
     layout: &wgpu::BindGroupLayout,
     uniform: &wgpu::Buffer,
     atlas: &wgpu::Texture,
     emission: &wgpu::Texture,
+    light: &wgpu::Texture,
+    light_write: &wgpu::Texture,
     vertices: &wgpu::Buffer,
     indices: &wgpu::Buffer,
+    hits: &wgpu::Buffer,
     tlas: &wgpu::Tlas,
 ) -> wgpu::BindGroup {
     let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
     let emit_view = emission.create_view(&wgpu::TextureViewDescriptor::default());
+    let light_view = light.create_view(&wgpu::TextureViewDescriptor::default());
+    let light_write_view = light_write.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
         label: Some("doom_ray_sampler"),
         mag_filter: wgpu::FilterMode::Nearest,
@@ -2606,6 +3175,18 @@ fn ray_bind_group(
             wgpu::BindGroupEntry {
                 binding: 7,
                 resource: wgpu::BindingResource::Sampler(&emit_sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 8,
+                resource: wgpu::BindingResource::TextureView(&light_write_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 9,
+                resource: wgpu::BindingResource::TextureView(&light_view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 10,
+                resource: hits.as_entire_binding(),
             },
         ],
     })
@@ -2716,10 +3297,10 @@ mod ray_test {
             // pos, uv, atlas, light, tint, pad. A white texel covers the whole triangle.
             // Pad is 1 so the triangle is sky emission. A non-emissive triangle
             // with nothing else in the scene would correctly stay black.
-            let verts: [f32; 42] = [
-                -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0,
-                0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, 0.0,
-                0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+            let verts: [f32; 48] = [
+                -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0,
+                1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0,
+                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, -1.0, -1.0,
             ];
             let indices: [u32; 3] = [0, 1, 2];
             let (vertex_usage, index_usage) = mesh_usage(true);
@@ -2821,8 +3402,14 @@ mod ray_test {
                     depth_or_array_layers: 1,
                 },
             );
+            let light = world_light_read(&device, 1);
+            let light_write = world_light_write(&device, 1);
+            clear_light(&queue, &light, 1);
+            let hits = light_hit_buffer(&device, 1);
+            let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &vertices, &index_buf, &tlas,
+                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {
                 view_proj: [
@@ -2999,13 +3586,13 @@ mod ray_test {
             let (layout, pipeline, uniform) =
                 create_ray_pipeline(&device, format).expect("ray pipeline");
 
-            // Not sky. White albedo, emission texel 255. The lamp term is
-            // albedo * 1 * 4, then divided by the sample count, so the pixel
-            // stays white. A missed emission sample stays black.
-            let verts: [f32; 42] = [
-                -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
-                1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
-                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
+            // Not sky. White albedo, emission texel 255. The surface shows
+            // the glow blended halfway with the texture, so the pixel is
+            // bright without clipping to white. A missed sample stays black.
+            let verts: [f32; 48] = [
+                -1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
+                1.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
+                0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
             ];
             let indices: [u32; 3] = [0, 1, 2];
             let (vertex_usage, index_usage) = mesh_usage(true);
@@ -3109,8 +3696,14 @@ mod ray_test {
                 update_mode: wgpu::AccelerationStructureUpdateMode::Build,
             });
             tlas[0] = Some(wgpu::TlasInstance::new(&blas, IDENTITY_3X4, 0, 0xff));
+            let light = world_light_read(&device, 1);
+            let light_write = world_light_write(&device, 1);
+            clear_light(&queue, &light, 1);
+            let hits = light_hit_buffer(&device, 1);
+            let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &vertices, &index_buf, &tlas,
+                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {
                 view_proj: [
@@ -3248,7 +3841,7 @@ mod ray_test {
             }
             let px = slice.get_mapped_range()[0..4].to_vec();
             assert!(
-                px[0] > 200 && px[1] > 200 && px[2] > 200,
+                px[0] > 80 && px[1] > 80 && px[2] > 80,
                 "emissive texel did not light the surface: {px:?}"
             );
         });
@@ -3296,10 +3889,10 @@ mod ray_test {
             // Center ray hits (0, 0, 0). Correct barycentrics land on UV
             // ~(0.08, 0.83), texel (0, 1). Swapped barycentrics land on
             // texel (1, 0), which is dark.
-            let verts: [f32; 42] = [
-                -2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
-                2.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
-                0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0,
+            let verts: [f32; 48] = [
+                -2.0, -1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
+                2.0, -1.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
+                0.0, 0.2, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 0.0, -1.0, -1.0,
             ];
             let indices: [u32; 3] = [0, 1, 2];
             let (vertex_usage, index_usage) = mesh_usage(true);
@@ -3404,8 +3997,14 @@ mod ray_test {
             });
             tlas[0] = Some(wgpu::TlasInstance::new(&blas, IDENTITY_3X4, 0, 0xff));
 
+            let light = world_light_read(&device, 1);
+            let light_write = world_light_write(&device, 1);
+            clear_light(&queue, &light, 1);
+            let hits = light_hit_buffer(&device, 1);
+            let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &vertices, &index_buf, &tlas,
+                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {
                 view_proj: [
@@ -3543,7 +4142,7 @@ mod ray_test {
             }
             let px = slice.get_mapped_range()[0..4].to_vec();
             assert!(
-                px[0] > 200 && px[1] > 200 && px[2] > 200,
+                px[0] > 80 && px[1] > 80 && px[2] > 80,
                 "backface hit missed the lit texel: {px:?}"
             );
         });

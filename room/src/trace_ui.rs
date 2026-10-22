@@ -80,6 +80,16 @@ impl TraceUi {
             .show(&self.ctx, |ui| {
                 ui.label("Click the view for first person. F1 frees the mouse.");
                 ui.label("Option-Return toggles fullscreen.");
+                ui.horizontal(|ui| {
+                    ui.label("Accumulate in");
+                    ui.selectable_value(&mut controls.world_space, true, "World");
+                    ui.selectable_value(&mut controls.world_space, false, "Screen");
+                });
+                ui.label(if controls.world_space {
+                    "The picture is the texture texel. Holding still fills it from every pixel on it."
+                } else {
+                    "Light builds up on the screen while you hold still."
+                });
                 ui.add(
                     egui::Slider::new(&mut controls.emission, 0.0..=80.0)
                         .text("Emissive photons"),
@@ -88,14 +98,22 @@ impl TraceUi {
                     egui::Slider::new(&mut controls.environment, 0.0..=8.0)
                         .text("Environment photons"),
                 );
+                ui.add(
+                    egui::Slider::new(&mut controls.flashlight, 0.0..=40.0)
+                        .text("Flashlight"),
+                );
                 ui.add(egui::Slider::new(&mut controls.bounces, 1..=8).text("Bounces"));
                 let mut height = controls.height as i32;
                 ui.add(egui::Slider::new(&mut height, 160..=1080).text("Ray height"));
                 controls.height = height as u32;
-                ui.label(format!(
-                    "Tracing {}×{}, {} accumulated",
-                    traced.0, traced.1, samples
-                ));
+                if controls.world_space {
+                    ui.label(format!("Tracing {}×{}, light in the texels", traced.0, traced.1));
+                } else {
+                    ui.label(format!(
+                        "Tracing {}×{}, {} accumulated",
+                        traced.0, traced.1, samples
+                    ));
+                }
             });
         if let Some(shown) = shown {
             self.panel = shown.response.rect;

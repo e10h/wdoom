@@ -32,10 +32,16 @@ use crate::doom::r_things::{hw_psprite_lump, hw_sprite_lump};
 use crate::doom::w_wad::{W_CacheLumpNum, W_LumpLength};
 use crate::doom::z_zone::PU_CACHE;
 use crate::voxel::{self, VoxelMesh};
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 const FRAC: f32 = 65536.0;
+/// Light is stored on its own map, one rectangle per placed surface.
+pub const LIGHTMAP_SIZE: u32 = 4096;
+/// Map units covered by one light texel. One matches a Doom texture pixel.
+const LIGHT_SCALE: f32 = 1.0;
+/// Rows kept under the level packing so enemy and object voxels can store light.
+const VOXEL_LIGHT_ROWS: i32 = 1024;
 const FF_FULLBRIGHT: i32 = 0x8000;
 const MF_SHADOW: i32 = 0x00040000;
 /// `GS_LEVEL` in `g_game.rs`. The constant itself is private to that module.
@@ -54,6 +60,10 @@ pub struct Vertex {
     pub light: f32,
     pub tint: [f32; 3],
     pub _pad: f32,
+    /// Where this vertex lands in the light map. Negative skips storage.
+    /// Each placed wall, floor, and voxel face gets its own rectangle, so a
+    /// repeated texture does not share light with its other copies.
+    pub light_uv: [f32; 2],
 }
 
 /// One frame of world geometry plus the camera and the HUD hole.
@@ -81,6 +91,9 @@ pub struct Scene {
     /// Fresh atlas pixels, present only on the frame the atlas is rebuilt.
     /// The third buffer is the brightmap emission, one byte per texel.
     pub atlas: Option<(u32, Vec<u8>, Vec<u8>)>,
+    /// The light map's rectangles moved, so stored light belongs to the
+    /// previous packing and has to be cleared.
+    pub light_reset: bool,
 }
 
 struct Atlas {
@@ -151,45 +164,17 @@ pub unsafe fn build_scene() -> Scene {
     let cam_up = cross(right, forward);
 
     ensure_flats(scratch);
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sky(&mut scratch.verts, &mut scratch.indices, atlas, eye, ang);
-        push_world(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            &scratch.flats,
-        );
-    }
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sprites(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            right,
-            true,
-        );
-    }
-    let opaque_indices = scratch.indices.len() as u32;
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sprites(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            right,
-            false,
-        );
-    }
-    let world_indices = scratch.indices.len() as u32;
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_weapon(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            eye,
-            forward,
-            right,
-            cam_up,
-        );
+    // The level's light rectangles are packed once. Later frames reuse them.
+    // Rebuilding here on every monster frame is what made the view hitch.
+    light_begin();
+    let (mut opaque_indices, mut world_indices) =
+        fill_scene(scratch, eye, ang, right, forward, cam_up);
+    let commit = light_commit();
+    if commit.rebuild {
+        scratch.verts.clear();
+        scratch.indices.clear();
+        light_reuse();
+        (opaque_indices, world_indices) = fill_scene(scratch, eye, ang, right, forward, cam_up);
     }
 
     let aspect = viewwidth as f32 / viewheight as f32;
@@ -225,7 +210,61 @@ pub unsafe fn build_scene() -> Scene {
         aspect,
         view_rect,
         atlas: atlas_upload,
+        light_reset: commit.clear,
     }
+}
+
+unsafe fn fill_scene(
+    scratch: &mut Scratch,
+    eye: [f32; 3],
+    ang: f32,
+    right: [f32; 3],
+    forward: [f32; 3],
+    cam_up: [f32; 3],
+) -> (u32, u32) {
+    if let Some(atlas) = scratch.atlas.as_ref() {
+        push_sky(&mut scratch.verts, &mut scratch.indices, atlas, eye, ang);
+        push_world(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            &scratch.flats,
+        );
+    }
+    // Voxels allocate after the level so a new animation frame cannot move
+    // the rectangles under the walls and floors.
+    if let Some(atlas) = scratch.atlas.as_ref() {
+        push_sprites(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            right,
+            true,
+        );
+    }
+    let opaque_indices = scratch.indices.len() as u32;
+    if let Some(atlas) = scratch.atlas.as_ref() {
+        push_sprites(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            right,
+            false,
+        );
+    }
+    let world_indices = scratch.indices.len() as u32;
+    if let Some(atlas) = scratch.atlas.as_ref() {
+        push_weapon(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            eye,
+            forward,
+            right,
+            cam_up,
+        );
+    }
+    (opaque_indices, world_indices)
 }
 
 /// Put the mesh buffers back so the next frame can reuse their allocation.
@@ -641,6 +680,7 @@ unsafe fn push_sky(
                 rect,
                 1.0,
                 [1.0; 3],
+                false,
             );
         }
     }
@@ -659,6 +699,35 @@ unsafe fn push_world(
     if segs.is_null() || subsectors.is_null() {
         return;
     }
+    // Planes reserve a rectangle before the walls are emitted. The packer
+    // still scales every request together, so neither side can fill the map
+    // and leave the other on the screen average.
+    let mut floor_light = Vec::with_capacity(numsubsectors.max(0) as usize);
+    let mut ceil_light = Vec::with_capacity(numsubsectors.max(0) as usize);
+    for i in 0..numsubsectors {
+        let sub = &*subsectors.add(i as usize);
+        let outline = flats.get(i as usize).map(Vec::as_slice).unwrap_or(&[]);
+        let (floor, ceil) = if sub.sector.is_null() || outline.len() < 3 {
+            (None, None)
+        } else {
+            let sector = &*(sub.sector as *const sector_t);
+            let floor = if flat_rect(atlas, sector.floorpic as i32) == [0.0; 4] {
+                None
+            } else {
+                reserve_poly(outline)
+            };
+            let ceil = if sector.ceilingpic as i32 == skyflatnum
+                || flat_rect(atlas, sector.ceilingpic as i32) == [0.0; 4]
+            {
+                None
+            } else {
+                reserve_poly(outline)
+            };
+            (floor, ceil)
+        };
+        floor_light.push(floor);
+        ceil_light.push(ceil);
+    }
     // One quad per solid surface. The partner seg of a two-sided line faces
     // the other way and would otherwise sit on the same plane.
     let mut drawn: HashSet<WallKey> = HashSet::new();
@@ -669,7 +738,15 @@ unsafe fn push_world(
     for i in 0..numsubsectors {
         let sub = &*subsectors.add(i as usize);
         let outline = flats.get(i as usize).map(Vec::as_slice).unwrap_or(&[]);
-        push_flat(verts, indices, atlas, sub, outline);
+        push_flat(
+            verts,
+            indices,
+            atlas,
+            sub,
+            outline,
+            floor_light.get(i as usize).copied().flatten(),
+            ceil_light.get(i as usize).copied().flatten(),
+        );
     }
 }
 
@@ -845,6 +922,7 @@ unsafe fn push_wall(
         rect,
         light,
         [1.0; 3],
+        true,
     );
 }
 
@@ -854,6 +932,8 @@ unsafe fn push_flat(
     atlas: &Atlas,
     sub: &subsector_t,
     outline: &[[f32; 2]],
+    floor_light: Option<PolyLight>,
+    ceil_light: Option<PolyLight>,
 ) {
     if sub.sector.is_null() || outline.len() < 3 {
         return;
@@ -863,7 +943,15 @@ unsafe fn push_flat(
     let y_floor = fx(sector.floorheight);
     let floor_rect = flat_rect(atlas, sector.floorpic as i32);
     if floor_rect != [0.0; 4] {
-        fan(verts, indices, outline, y_floor, floor_rect, light);
+        fan(
+            verts,
+            indices,
+            outline,
+            y_floor,
+            floor_rect,
+            light,
+            floor_light,
+        );
     }
     if sector.ceilingpic as i32 != skyflatnum {
         let ceil_rect = flat_rect(atlas, sector.ceilingpic as i32);
@@ -875,6 +963,7 @@ unsafe fn push_flat(
                 fx(sector.ceilingheight),
                 ceil_rect,
                 light,
+                ceil_light,
             );
         }
     }
@@ -887,6 +976,7 @@ fn fan(
     y: f32,
     rect: [f32; 4],
     light: f32,
+    baked: Option<PolyLight>,
 ) {
     if poly.len() < 3 || verts.len() + poly.len() > 2_000_000 {
         return;
@@ -900,6 +990,7 @@ fn fan(
             light,
             tint: [1.0; 3],
             _pad: 0.0,
+            light_uv: baked.map(|b| b.uv(p[0], p[1])).unwrap_or([-1.0, -1.0]),
         });
     }
     for i in 1..poly.len() as u32 - 1 {
@@ -1178,6 +1269,7 @@ unsafe fn push_billboard(
         rect,
         light,
         [1.0; 3],
+        false,
     );
 }
 
@@ -1259,6 +1351,7 @@ unsafe fn push_weapon(
             rect,
             1.0,
             [1.0; 3],
+            false,
         );
     }
 }
@@ -1278,7 +1371,9 @@ fn push_voxel(
     let oy = fx(th.z);
     let oz = -fx(th.y);
     let uv = [[0.5, 0.5]; 4];
-    for quad in &mesh.quads {
+    let thing_id = th as *const mobj_t as usize;
+    let mesh_id = Arc::as_ptr(mesh) as usize;
+    for (qi, quad) in mesh.quads.iter().enumerate() {
         let mut p = [[0.0; 3]; 4];
         for i in 0..4 {
             let m = quad.p[i];
@@ -1289,7 +1384,8 @@ fn push_voxel(
             ];
         }
         let rgb = mesh.palette[quad.color as usize];
-        push_quad(
+        let light_uv = voxel_light_uvs(thing_id, mesh_id, qi, quad.p);
+        push_quad_at(
             verts,
             indices,
             p,
@@ -1301,6 +1397,7 @@ fn push_voxel(
                 rgb[1] as f32 / 255.0,
                 rgb[2] as f32 / 255.0,
             ],
+            light_uv,
         );
     }
 }
@@ -1313,6 +1410,25 @@ fn push_quad(
     atlas: [f32; 4],
     light: f32,
     tint: [f32; 3],
+    bake: bool,
+) {
+    let light_uv = if bake {
+        light_uvs_for_quad(p, uv)
+    } else {
+        [[-1.0, -1.0]; 4]
+    };
+    push_quad_at(verts, indices, p, uv, atlas, light, tint, light_uv);
+}
+
+fn push_quad_at(
+    verts: &mut Vec<Vertex>,
+    indices: &mut Vec<u32>,
+    p: [[f32; 3]; 4],
+    uv: [[f32; 2]; 4],
+    atlas: [f32; 4],
+    light: f32,
+    tint: [f32; 3],
+    light_uv: [[f32; 2]; 4],
 ) {
     if verts.len() + 4 > 2_000_000 {
         return;
@@ -1326,9 +1442,441 @@ fn push_quad(
             light,
             tint,
             _pad: 0.0,
+            light_uv: light_uv[i],
         });
     }
     indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+}
+
+#[derive(Clone, Copy)]
+struct Shelf {
+    x: i32,
+    y: i32,
+    row_h: i32,
+}
+
+struct LightCommit {
+    rebuild: bool,
+    clear: bool,
+}
+
+struct Lightmap {
+    /// `vertexes` pointer, so a new map packs again.
+    level_key: usize,
+    /// Record world sizes and ignore the stored packing.
+    recording: bool,
+    cursor: usize,
+    /// Texel scale chosen when the level was packed. Voxels use it too.
+    scale: f32,
+    /// Shelf cursor after the level geometry. Voxels allocate past it.
+    map_shelf: Shelf,
+    shelf: Shelf,
+    reqs: Vec<(i32, i32)>,
+    placed: Vec<Option<(i32, i32, i32, i32)>>,
+    /// Light rectangle for one voxel face. Keyed by thing, mesh, and quad so
+    /// an animation frame does not repack the level.
+    voxels: Option<HashMap<(usize, usize, u32), Option<(i32, i32, i32, i32)>>>,
+}
+
+static mut LIGHTMAP: Lightmap = Lightmap {
+    level_key: 0,
+    recording: false,
+    cursor: 0,
+    scale: 1.0,
+    map_shelf: Shelf {
+        x: 0,
+        y: 0,
+        row_h: 0,
+    },
+    shelf: Shelf {
+        x: 0,
+        y: 0,
+        row_h: 0,
+    },
+    reqs: Vec::new(),
+    placed: Vec::new(),
+    voxels: None,
+};
+
+fn light_begin() {
+    unsafe {
+        let key = vertexes as usize;
+        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
+        if lm.level_key != key {
+            lm.level_key = key;
+            lm.placed.clear();
+            lm.voxels = None;
+            lm.scale = 1.0;
+            lm.map_shelf = Shelf {
+                x: 0,
+                y: 0,
+                row_h: 0,
+            };
+            lm.shelf = voxel_light_shelf();
+        }
+        lm.reqs.clear();
+        lm.cursor = 0;
+        lm.recording = lm.placed.is_empty();
+    }
+}
+
+fn light_reuse() {
+    unsafe {
+        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
+        lm.recording = false;
+        lm.cursor = 0;
+        lm.reqs.clear();
+        lm.shelf = voxel_light_shelf();
+        lm.voxels = None;
+    }
+}
+
+fn light_commit() -> LightCommit {
+    unsafe {
+        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
+        if !lm.recording {
+            return LightCommit {
+                rebuild: false,
+                clear: false,
+            };
+        }
+        let rebuild = !lm.reqs.is_empty();
+        pack_lightmap(lm);
+        lm.recording = false;
+        lm.cursor = 0;
+        lm.reqs.clear();
+        LightCommit {
+            rebuild,
+            clear: rebuild,
+        }
+    }
+}
+
+fn pack_lightmap(lm: &mut Lightmap) {
+    let (placed, shelf, scale) = pack_group(
+        &lm.reqs,
+        Shelf {
+            x: 0,
+            y: 0,
+            row_h: 0,
+        },
+        world_light_limit(),
+    );
+    lm.placed = placed;
+    lm.scale = scale;
+    lm.map_shelf = shelf;
+    // Voxels pack under the level, so a full map of walls cannot crowd them out.
+    lm.shelf = voxel_light_shelf();
+    lm.voxels = None;
+}
+
+fn world_light_limit() -> i32 {
+    LIGHTMAP_SIZE as i32 - VOXEL_LIGHT_ROWS
+}
+
+fn voxel_light_shelf() -> Shelf {
+    Shelf {
+        x: 0,
+        y: world_light_limit(),
+        row_h: 0,
+    }
+}
+
+/// Shelf-pack every request at one scale, so a floor cannot crowd a wall out.
+fn pack_group(
+    reqs: &[(i32, i32)],
+    shelf: Shelf,
+    limit_y: i32,
+) -> (Vec<Option<(i32, i32, i32, i32)>>, Shelf, f32) {
+    if reqs.is_empty() {
+        return (Vec::new(), shelf, 1.0);
+    }
+    if let Some((placed, shelf)) = try_place(reqs, 1.0, shelf, limit_y) {
+        return (placed, shelf, 1.0);
+    }
+    let mut lo = 0.0f32;
+    let mut hi = 1.0f32;
+    let mut best = None;
+    for _ in 0..18 {
+        let mid = (lo + hi) * 0.5;
+        if let Some(hit) = try_place(reqs, mid, shelf, limit_y) {
+            best = Some(hit);
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    if let Some((placed, shelf)) = best {
+        return (placed, shelf, lo);
+    }
+    let scale = lo.max(1.0 / 64.0);
+    let (placed, shelf) = place_partial(reqs, scale, shelf, limit_y);
+    (placed, shelf, scale)
+}
+
+fn scaled_light(wh: (i32, i32), scale: f32) -> (i32, i32) {
+    let w = ((wh.0 as f32) * scale).ceil() as i32;
+    let h = ((wh.1 as f32) * scale).ceil() as i32;
+    (w.clamp(1, 512), h.clamp(1, 512))
+}
+
+fn light_order(reqs: &[(i32, i32)]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..reqs.len()).collect();
+    order.sort_by(|&a, &b| {
+        reqs[b]
+            .1
+            .cmp(&reqs[a].1)
+            .then(reqs[b].0.cmp(&reqs[a].0))
+            .then(a.cmp(&b))
+    });
+    order
+}
+
+fn try_place(
+    reqs: &[(i32, i32)],
+    scale: f32,
+    mut shelf: Shelf,
+    limit_y: i32,
+) -> Option<(Vec<Option<(i32, i32, i32, i32)>>, Shelf)> {
+    let size = LIGHTMAP_SIZE as i32;
+    let mut placed = vec![None; reqs.len()];
+    for i in light_order(reqs) {
+        let (w, h) = scaled_light(reqs[i], scale);
+        if shelf.x > 0 && shelf.x + w > size {
+            shelf.y += shelf.row_h + 1;
+            shelf.x = 0;
+            shelf.row_h = 0;
+        }
+        if shelf.x + w > size || shelf.y + h > limit_y {
+            return None;
+        }
+        placed[i] = Some((shelf.x, shelf.y, w, h));
+        shelf.x += w + 1;
+        shelf.row_h = shelf.row_h.max(h);
+    }
+    Some((placed, shelf))
+}
+
+fn place_partial(
+    reqs: &[(i32, i32)],
+    scale: f32,
+    mut shelf: Shelf,
+    limit_y: i32,
+) -> (Vec<Option<(i32, i32, i32, i32)>>, Shelf) {
+    let size = LIGHTMAP_SIZE as i32;
+    let mut placed = vec![None; reqs.len()];
+    for i in light_order(reqs) {
+        let (w, h) = scaled_light(reqs[i], scale);
+        let (mut x, mut y, mut row_h) = (shelf.x, shelf.y, shelf.row_h);
+        if x > 0 && x + w > size {
+            y += row_h + 1;
+            x = 0;
+            row_h = 0;
+        }
+        if x + w > size || y + h > limit_y {
+            continue;
+        }
+        placed[i] = Some((x, y, w, h));
+        shelf.x = x + w + 1;
+        shelf.y = y;
+        shelf.row_h = row_h.max(h);
+    }
+    (placed, shelf)
+}
+
+fn alloc_fit(w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
+    let w = w.max(1);
+    let h = h.max(1);
+    unsafe {
+        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
+        let i = lm.cursor;
+        lm.cursor += 1;
+        if lm.recording {
+            lm.reqs.push((w, h));
+            Some((0, 0, w, h))
+        } else {
+            lm.placed.get(i).copied().flatten()
+        }
+    }
+}
+
+fn alloc_voxel(thing: usize, mesh: usize, quad: u32, w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
+    unsafe {
+        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
+        if lm.recording {
+            return None;
+        }
+        let key = (thing, mesh, quad);
+        if let Some(rect) = lm.voxels.as_ref().and_then(|map| map.get(&key).copied()) {
+            return rect;
+        }
+        let rect = place_one(w, h, lm.scale, 16, LIGHTMAP_SIZE as i32, &mut lm.shelf);
+        lm.voxels.get_or_insert_with(HashMap::new).insert(key, rect);
+        rect
+    }
+}
+
+fn place_one(
+    w: i32,
+    h: i32,
+    scale: f32,
+    max_side: i32,
+    limit_y: i32,
+    shelf: &mut Shelf,
+) -> Option<(i32, i32, i32, i32)> {
+    let (mut w, mut h) = scaled_light((w.max(1), h.max(1)), scale);
+    w = w.min(max_side);
+    h = h.min(max_side);
+    for _ in 0..6 {
+        if let Some(rect) = shelf_fit(w, h, limit_y, shelf) {
+            return Some(rect);
+        }
+        if w <= 1 && h <= 1 {
+            break;
+        }
+        w = (w / 2).max(1);
+        h = (h / 2).max(1);
+    }
+    None
+}
+
+fn shelf_fit(w: i32, h: i32, limit_y: i32, shelf: &mut Shelf) -> Option<(i32, i32, i32, i32)> {
+    let size = LIGHTMAP_SIZE as i32;
+    let mut x = shelf.x;
+    let mut y = shelf.y;
+    let mut row_h = shelf.row_h;
+    if x > 0 && x + w > size {
+        y += row_h + 1;
+        x = 0;
+        row_h = 0;
+    }
+    if x + w > size || y + h > limit_y {
+        return None;
+    }
+    shelf.x = x + w + 1;
+    shelf.y = y;
+    shelf.row_h = row_h.max(h);
+    Some((x, y, w, h))
+}
+
+fn voxel_light_uvs(thing: usize, mesh: usize, quad: usize, model: [[f32; 3]; 4]) -> [[f32; 2]; 4] {
+    let width = dist3(model[0], model[3]).max(dist3(model[1], model[2]));
+    let height = dist3(model[0], model[1]).max(dist3(model[2], model[3]));
+    let Some((x, y, w, h)) = alloc_voxel(
+        thing,
+        mesh,
+        quad as u32,
+        (width / LIGHT_SCALE).ceil() as i32,
+        (height / LIGHT_SCALE).ceil() as i32,
+    ) else {
+        return [[-1.0, -1.0]; 4];
+    };
+    let corners = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    let mut out = [[0.0; 2]; 4];
+    for i in 0..4 {
+        out[i] = light_uv_at(x, y, w, h, corners[i][0], corners[i][1]);
+    }
+    out
+}
+
+fn light_uv_at(x: i32, y: i32, w: i32, h: i32, tu: f32, tv: f32) -> [f32; 2] {
+    let size = LIGHTMAP_SIZE as f32;
+    [
+        (x as f32 + tu.clamp(0.0, 1.0) * (w - 1) as f32 + 0.01) / size,
+        (y as f32 + tv.clamp(0.0, 1.0) * (h - 1) as f32 + 0.01) / size,
+    ]
+}
+
+fn light_uvs_for_quad(p: [[f32; 3]; 4], uv: [[f32; 2]; 4]) -> [[f32; 2]; 4] {
+    let mut min_u = f32::MAX;
+    let mut max_u = f32::MIN;
+    let mut min_v = f32::MAX;
+    let mut max_v = f32::MIN;
+    for t in uv {
+        min_u = min_u.min(t[0]);
+        max_u = max_u.max(t[0]);
+        min_v = min_v.min(t[1]);
+        max_v = max_v.max(t[1]);
+    }
+    let du = max_u - min_u;
+    let dv = max_v - min_v;
+    let width = dist3(p[0], p[3]).max(dist3(p[1], p[2]));
+    let height = dist3(p[0], p[1]).max(dist3(p[2], p[3]));
+    let (w, h) = (
+        (width / LIGHT_SCALE).ceil() as i32,
+        (height / LIGHT_SCALE).ceil() as i32,
+    );
+    let Some((x, y, w, h)) = alloc_fit(w, h) else {
+        return [[-1.0, -1.0]; 4];
+    };
+    let mut out = [[0.0; 2]; 4];
+    let corners = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
+    for i in 0..4 {
+        let (tu, tv) = if du > 1e-3 && dv > 1e-3 {
+            ((uv[i][0] - min_u) / du, (uv[i][1] - min_v) / dv)
+        } else {
+            (corners[i][0], corners[i][1])
+        };
+        out[i] = light_uv_at(x, y, w, h, tu, tv);
+    }
+    out
+}
+
+#[derive(Clone, Copy)]
+struct PolyLight {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+    minx: f32,
+    miny: f32,
+    dx: f32,
+    dy: f32,
+}
+
+impl PolyLight {
+    fn uv(self, px: f32, py: f32) -> [f32; 2] {
+        light_uv_at(
+            self.x,
+            self.y,
+            self.w,
+            self.h,
+            (px - self.minx) / self.dx,
+            (py - self.miny) / self.dy,
+        )
+    }
+}
+
+fn reserve_poly(poly: &[[f32; 2]]) -> Option<PolyLight> {
+    let mut minx = f32::MAX;
+    let mut miny = f32::MAX;
+    let mut maxx = f32::MIN;
+    let mut maxy = f32::MIN;
+    for p in poly {
+        minx = minx.min(p[0]);
+        miny = miny.min(p[1]);
+        maxx = maxx.max(p[0]);
+        maxy = maxy.max(p[1]);
+    }
+    let (x, y, w, h) = alloc_fit(
+        ((maxx - minx) / LIGHT_SCALE).ceil() as i32,
+        ((maxy - miny) / LIGHT_SCALE).ceil() as i32,
+    )?;
+    Some(PolyLight {
+        x,
+        y,
+        w,
+        h,
+        minx,
+        miny,
+        dx: (maxx - minx).max(1e-3),
+        dy: (maxy - miny).max(1e-3),
+    })
+}
+
+fn dist3(a: [f32; 3], b: [f32; 3]) -> f32 {
+    let d = [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+    (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt()
 }
 
 fn tex_rect(atlas: &Atlas, tex: i32) -> [f32; 4] {
@@ -1434,7 +1982,10 @@ fn norm(v: [f32; 3]) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::seg_faces_view;
+    use super::{
+        pack_group, place_one, seg_faces_view, voxel_light_shelf, world_light_limit, Shelf,
+        LIGHTMAP_SIZE,
+    };
 
     #[test]
     fn wall_is_drawn_from_the_front_only() {
@@ -1448,5 +1999,60 @@ mod tests {
         assert!(!seg_faces_view(x1, y1, x2, y2, 0, north));
         assert!(!seg_faces_view(x2, y2, x1, y1, 0, south));
         assert!(seg_faces_view(x2, y2, x1, y1, 0, north));
+    }
+
+    #[test]
+    fn light_rects_cover_floors_and_walls() {
+        let mut reqs = Vec::new();
+        for _ in 0..80 {
+            reqs.push((900, 700));
+        }
+        for _ in 0..4000 {
+            reqs.push((96, 128));
+        }
+        let (placed, _, _) = pack_group(
+            &reqs,
+            Shelf {
+                x: 0,
+                y: 0,
+                row_h: 0,
+            },
+            LIGHTMAP_SIZE as i32,
+        );
+        assert_eq!(placed.len(), reqs.len());
+        assert!(placed.iter().all(|rect| rect.is_some()));
+        let mut used = vec![0u8; (LIGHTMAP_SIZE * LIGHTMAP_SIZE) as usize];
+        for (x, y, w, h) in placed.into_iter().flatten() {
+            for row in y..y + h {
+                for col in x..x + w {
+                    let i = row as usize * LIGHTMAP_SIZE as usize + col as usize;
+                    assert_eq!(used[i], 0, "light texels overlap");
+                    used[i] = 1;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voxel_faces_pack_under_the_level() {
+        let reqs = vec![(3000, 2000); 6];
+        let (placed, _, _) = pack_group(
+            &reqs,
+            Shelf {
+                x: 0,
+                y: 0,
+                row_h: 0,
+            },
+            world_light_limit(),
+        );
+        for (_, y, _, h) in placed.into_iter().flatten() {
+            assert!(y + h <= world_light_limit());
+        }
+        let mut shelf = voxel_light_shelf();
+        let (x, y, w, h) =
+            place_one(32, 32, 1.0, 16, LIGHTMAP_SIZE as i32, &mut shelf).expect("voxel face");
+        assert!(y >= world_light_limit());
+        assert!(y + h <= LIGHTMAP_SIZE as i32);
+        assert!(x + w <= LIGHTMAP_SIZE as i32);
     }
 }
