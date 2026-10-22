@@ -12,6 +12,8 @@ pub struct TraceUi {
     state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
     window: Arc<Window>,
+    panel: egui::Rect,
+    cursor: Option<egui::Pos2>,
 }
 
 impl TraceUi {
@@ -31,11 +33,31 @@ impl TraceUi {
             state,
             renderer,
             window,
+            panel: egui::Rect::NOTHING,
+            cursor: None,
         }
     }
 
     pub fn on_event(&mut self, event: &WindowEvent) -> bool {
-        self.state.on_window_event(&self.window, event).consumed
+        if let WindowEvent::CursorMoved { position, .. } = event {
+            let scale = self.window.scale_factor() as f32;
+            self.cursor = Some(egui::pos2(
+                position.x as f32 / scale,
+                position.y as f32 / scale,
+            ));
+        }
+        let response = self.state.on_window_event(&self.window, event);
+        // The panel keeps the click. The game view does not, even when egui
+        // still has last frame's pointer over the panel.
+        if matches!(event, WindowEvent::MouseInput { .. }) {
+            self.pointer_over_ui()
+        } else {
+            response.consumed
+        }
+    }
+
+    pub fn pointer_over_ui(&self) -> bool {
+        self.cursor.is_some_and(|pos| self.panel.contains(pos))
     }
 
     pub fn paint(
@@ -52,11 +74,12 @@ impl TraceUi {
     ) {
         let input = self.state.take_egui_input(&self.window);
         self.ctx.begin_pass(input);
-        egui::Window::new("Path tracer")
+        let shown = egui::Window::new("Path tracer")
             .default_pos(egui::pos2(12.0, 12.0))
             .resizable(false)
             .show(&self.ctx, |ui| {
-                ui.label("F1 frees the mouse. Option-Return toggles fullscreen.");
+                ui.label("Click the view for first person. F1 frees the mouse.");
+                ui.label("Option-Return toggles fullscreen.");
                 ui.add(
                     egui::Slider::new(&mut controls.emission, 0.0..=80.0)
                         .text("Emissive photons"),
@@ -74,6 +97,9 @@ impl TraceUi {
                     traced.0, traced.1, samples
                 ));
             });
+        if let Some(shown) = shown {
+            self.panel = shown.response.rect;
+        }
         let output = self.ctx.end_pass();
         self.state
             .handle_platform_output(&self.window, output.platform_output);

@@ -1954,6 +1954,18 @@ pub extern "C" fn M_Drawer() {
     }
 }
 
+/// Close the menu so a click in the view can return to the level.
+/// A yes/no prompt stays open.
+pub fn dismiss_menu_for_play() -> bool {
+    unsafe {
+        if messageToPrint != 0 {
+            return false;
+        }
+        menuactive = 0;
+        true
+    }
+}
+
 /// Close all menus by setting `menuactive` to 0.
 fn M_ClearMenus() {
     unsafe {

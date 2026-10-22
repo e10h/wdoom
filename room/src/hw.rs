@@ -60,9 +60,9 @@ pub struct Vertex {
 pub struct Scene {
     pub verts: Vec<Vertex>,
     pub indices: Vec<u32>,
-    /// Index count of sky, walls, and flats. Hardware ray tracing traces this
-    /// prefix. Sprites follow, through `world_indices`, and stay rasterized
-    /// so their transparent texels still discard.
+    /// Index count of sky, walls, flats, and voxel models. Hardware ray
+    /// tracing traces this prefix. Billboard sprites follow, through
+    /// `world_indices`, and stay rasterized so their transparent texels discard.
     pub opaque_indices: u32,
     /// Index count of sky, walls, flats, and sprites. The rest are the weapon,
     /// drawn with depth testing disabled so nearby walls do not clip it.
@@ -160,9 +160,24 @@ pub unsafe fn build_scene() -> Scene {
             &scratch.flats,
         );
     }
+    if let Some(atlas) = scratch.atlas.as_ref() {
+        push_sprites(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            right,
+            true,
+        );
+    }
     let opaque_indices = scratch.indices.len() as u32;
     if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sprites(&mut scratch.verts, &mut scratch.indices, atlas, right);
+        push_sprites(
+            &mut scratch.verts,
+            &mut scratch.indices,
+            atlas,
+            right,
+            false,
+        );
     }
     let world_indices = scratch.indices.len() as u32;
     if let Some(atlas) = scratch.atlas.as_ref() {
@@ -1074,6 +1089,7 @@ unsafe fn push_sprites(
     indices: &mut Vec<u32>,
     atlas: &Atlas,
     right: [f32; 3],
+    voxels: bool,
 ) {
     if sectors.is_null()
         || spritewidth.is_null()
@@ -1104,7 +1120,12 @@ unsafe fn push_sprites(
                 light = 0.18;
             }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
-                push_voxel(verts, indices, atlas, th, &mesh, extra, light);
+                if voxels {
+                    push_voxel(verts, indices, atlas, th, &mesh, extra, light);
+                }
+                continue;
+            }
+            if voxels {
                 continue;
             }
             let Some((lump, flip)) = hw_sprite_lump(th.sprite, th.frame, th.x, th.y, th.angle)

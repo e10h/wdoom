@@ -1461,10 +1461,23 @@ impl GpuState {
                 *traced,
                 *accum_count,
             );
+            crate::platform::maintain_pointer_capture();
         }
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (encoder, view);
+        }
+    }
+
+    /// The pointer is over the path-tracer panel, so a click stays there.
+    pub fn pointer_over_ui(&self) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.ui.pointer_over_ui()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            false
         }
     }
 
@@ -1964,14 +1977,17 @@ impl AccumKey {
     }
 
     fn same(&self, other: &Self) -> bool {
-        let a = bytemuck::bytes_of(self);
-        let b = bytemuck::bytes_of(other);
-        a.chunks(4).zip(b.chunks(4)).all(|(x, y)| {
-            let x = f32::from_le_bytes(x.try_into().unwrap());
-            let y = f32::from_le_bytes(y.try_into().unwrap());
-            (x - y).abs() <= 1e-4
-        })
+        near(self.eye, other.eye)
+            && near(self.right, other.right)
+            && near(self.up, other.up)
+            && near(self.forward, other.forward)
+            && near(self.light, other.light)
+            && near(self.size, other.size)
     }
+}
+
+fn near<const N: usize>(a: [f32; N], b: [f32; N]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() <= 1e-4)
 }
 
 const ACC_SHADER: &str = r#"

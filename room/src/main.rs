@@ -201,6 +201,14 @@ impl ApplicationHandler for App {
             event,
             WindowEvent::CloseRequested | WindowEvent::Resized(_)
         ) && GPU.with_borrow_mut(|g| g.as_mut().is_some_and(|gpu| gpu.on_window_event(&event)));
+        if let WindowEvent::MouseInput { state, button, .. } = &event {
+            if *button == winit::event::MouseButton::Left
+                && *state == winit::event::ElementState::Pressed
+                && !GPU.with_borrow(|g| g.as_ref().is_some_and(|gpu| gpu.pointer_over_ui()))
+            {
+                platform::enter_first_person();
+            }
+        }
         if ui_used {
             return;
         }

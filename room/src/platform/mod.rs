@@ -103,8 +103,8 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
 /// Left click captures the cursor and fires. Other buttons keep their
 /// Doom bindings (right strafe, middle forward).
 pub fn on_mouse_button(button: MouseButton, pressed: bool) {
-    if button == MouseButton::Left && pressed && level_playing() {
-        capture_pointer();
+    if button == MouseButton::Left && pressed {
+        enter_first_person();
     }
     let Some(bit) = mouse_bit(button) else {
         return;
@@ -179,18 +179,44 @@ pub fn set_pointer_locked(locked: bool) {
     }
 }
 
+/// Lock the mouse for first-person look. Closes the menu. A confirm
+/// prompt and the title screen stay as they are.
+pub fn enter_first_person() {
+    let playing = unsafe {
+        crate::doom::g_game::gamestate == 0 && crate::doom::g_game::demoplayback == 0
+    };
+    if !playing || !crate::doom::m_menu::dismiss_menu_for_play() {
+        return;
+    }
+    capture_pointer();
+}
+
+/// The settings panel shows the cursor again after it draws. Hide it
+/// without grabbing a second time: a fresh grab feeds a mouse delta
+/// and the still-camera average never builds.
+pub fn maintain_pointer_capture() {
+    if !CURSOR_LOCKED.with(|c| c.get()) {
+        return;
+    }
+    WINDOW.with_borrow(|w| {
+        if let Some(win) = w.as_ref() {
+            win.set_cursor_visible(false);
+        }
+    });
+}
+
 fn capture_pointer() {
-    let grabbed = WINDOW.with_borrow(|w| {
+    let ready = WINDOW.with_borrow(|w| {
         let Some(win) = w.as_ref() else {
             return false;
         };
-        if win.set_cursor_grab(CursorGrabMode::Locked).is_err() {
-            return false;
-        }
+        // Locked reports deltas. If the OS refuses, still hide the cursor
+        // and accept motion while it is over the window.
+        let _ = win.set_cursor_grab(CursorGrabMode::Locked);
         win.set_cursor_visible(false);
         true
     });
-    if grabbed {
+    if ready {
         CURSOR_LOCKED.with(|c| c.set(true));
     }
 }
@@ -218,11 +244,6 @@ pub fn release_pointer() {
             win.set_cursor_visible(true);
         }
     });
-}
-
-fn level_playing() -> bool {
-    // `GS_LEVEL` is 0. The menu uses the keyboard, so leave the cursor free.
-    unsafe { crate::doom::g_game::gamestate == 0 && crate::doom::m_menu::menuactive == 0 }
 }
 
 fn mouse_bit(button: MouseButton) -> Option<u32> {
