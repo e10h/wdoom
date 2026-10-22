@@ -94,6 +94,16 @@ pub struct Scene {
     /// The light map's rectangles moved, so stored light belongs to the
     /// previous packing and has to be cleared.
     pub light_reset: bool,
+    /// Identifies this level's light packing for a disk bake.
+    pub light_bake: Option<LightBakeKey>,
+}
+
+/// Episode, map, and packing fingerprint for a saved light bake.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct LightBakeKey {
+    pub episode: i32,
+    pub map: i32,
+    pub pack_hash: u64,
 }
 
 struct Atlas {
@@ -211,6 +221,7 @@ pub unsafe fn build_scene() -> Scene {
         view_rect,
         atlas: atlas_upload,
         light_reset: commit.clear,
+        light_bake: light_bake_key(),
     }
 }
 
@@ -1473,6 +1484,8 @@ struct Lightmap {
     shelf: Shelf,
     reqs: Vec<(i32, i32)>,
     placed: Vec<Option<(i32, i32, i32, i32)>>,
+    /// Fingerprint of `placed`, so a bake file matches this packing.
+    pack_hash: u64,
     /// Light rectangle for one voxel face. Keyed by thing, mesh, and quad so
     /// an animation frame does not repack the level.
     voxels: Option<HashMap<(usize, usize, u32), Option<(i32, i32, i32, i32)>>>,
@@ -1495,6 +1508,7 @@ static mut LIGHTMAP: Lightmap = Lightmap {
     },
     reqs: Vec::new(),
     placed: Vec::new(),
+    pack_hash: 0,
     voxels: None,
 };
 
@@ -1505,6 +1519,7 @@ fn light_begin() {
         if lm.level_key != key {
             lm.level_key = key;
             lm.placed.clear();
+            lm.pack_hash = 0;
             lm.voxels = None;
             lm.scale = 1.0;
             lm.map_shelf = Shelf {
@@ -1552,6 +1567,42 @@ fn light_commit() -> LightCommit {
     }
 }
 
+fn light_bake_key() -> Option<LightBakeKey> {
+    unsafe {
+        let lm = &*std::ptr::addr_of!(LIGHTMAP);
+        if lm.placed.is_empty() || lm.pack_hash == 0 {
+            return None;
+        }
+        Some(LightBakeKey {
+            episode: crate::doom::g_game::gameepisode,
+            map: crate::doom::g_game::gamemap,
+            pack_hash: lm.pack_hash,
+        })
+    }
+}
+
+fn pack_hash(placed: &[Option<(i32, i32, i32, i32)>], scale: f32) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    LIGHTMAP_SIZE.hash(&mut h);
+    VOXEL_LIGHT_ROWS.hash(&mut h);
+    scale.to_bits().hash(&mut h);
+    placed.len().hash(&mut h);
+    for rect in placed {
+        match *rect {
+            Some((x, y, w, hh)) => {
+                1u8.hash(&mut h);
+                x.hash(&mut h);
+                y.hash(&mut h);
+                w.hash(&mut h);
+                hh.hash(&mut h);
+            }
+            None => 0u8.hash(&mut h),
+        }
+    }
+    h.finish()
+}
+
 fn pack_lightmap(lm: &mut Lightmap) {
     let (placed, shelf, scale) = pack_group(
         &lm.reqs,
@@ -1562,6 +1613,7 @@ fn pack_lightmap(lm: &mut Lightmap) {
         },
         world_light_limit(),
     );
+    lm.pack_hash = pack_hash(&placed, scale);
     lm.placed = placed;
     lm.scale = scale;
     lm.map_shelf = shelf;

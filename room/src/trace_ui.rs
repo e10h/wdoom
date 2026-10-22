@@ -86,7 +86,7 @@ impl TraceUi {
                     ui.selectable_value(&mut controls.world_space, false, "Screen");
                 });
                 ui.label(if controls.world_space {
-                    "The picture is the texture texel. Looking at a surface keeps filling it in."
+                    "Light stays in the texture and is saved for the next load of this map."
                 } else {
                     "Light builds up on the screen while you hold still."
                 });

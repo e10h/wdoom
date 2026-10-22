@@ -694,6 +694,35 @@ pub struct GpuState {
     accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
     ui: crate::trace_ui::TraceUi,
+    /// Level packing currently stored in the light texture.
+    light_bake_key: Option<crate::hw::LightBakeKey>,
+    /// True when the GPU light map has samples that are not on disk yet.
+    light_bake_dirty: bool,
+    /// Last time a bake copy was started. Periodic saves stay off the hot path.
+    light_bake_saved: Option<std::time::Instant>,
+    /// Non-blocking readback / background write of a light bake.
+    #[cfg(not(target_arch = "wasm32"))]
+    light_bake_job: Option<LightBakeJob>,
+}
+
+impl Drop for GpuState {
+    fn drop(&mut self) {
+        self.begin_light_bake_save();
+        self.finish_light_bake_save();
+    }
+}
+
+/// GPU copy of the light map, then a background thread writes the sparse file.
+#[cfg(not(target_arch = "wasm32"))]
+enum LightBakeJob {
+    Mapping {
+        key: crate::hw::LightBakeKey,
+        buffer: wgpu::Buffer,
+        bytes_per_row: u32,
+        size: u32,
+        rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
+    },
+    Writing(std::thread::JoinHandle<()>),
 }
 
 /// Constructors and frame-time operations for [`GpuState`].
@@ -1061,6 +1090,11 @@ impl GpuState {
             accum,
             #[cfg(not(target_arch = "wasm32"))]
             ui,
+            light_bake_key: None,
+            light_bake_dirty: false,
+            light_bake_saved: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            light_bake_job: None,
         })
     }
 
@@ -1207,9 +1241,9 @@ impl GpuState {
             .map(|(size, rgba, emit)| (*size, rgba.as_slice(), emit.as_slice()));
         self.ensure_world(atlas);
         if scene.light_reset {
-            if let Some(world) = &self.world {
-                clear_light(&self.queue, &world.light, crate::hw::LIGHTMAP_SIZE);
-            }
+            self.reset_light_bake(scene.light_bake);
+        } else if scene.light_bake.is_some() {
+            self.light_bake_key = scene.light_bake;
         }
         let rect = scene.view_rect;
         let surf_w = self.config.width as f32;
@@ -1368,6 +1402,7 @@ impl GpuState {
                         &world.light,
                         crate::hw::LIGHTMAP_SIZE,
                     );
+                    self.light_bake_dirty = true;
                 }
             }
             {
@@ -1523,7 +1558,255 @@ impl GpuState {
 
         self.queue.submit(std::iter::once(encoder.finish()));
         output.present();
+        self.maybe_save_light_bake();
         Ok(())
+    }
+
+    /// Snapshot the current light map off-thread, then load the bake for `next`
+    /// (or clear when there is none).
+    fn reset_light_bake(&mut self, next: Option<crate::hw::LightBakeKey>) {
+        // Copy first so the staging buffer keeps the old bake while we replace
+        // the live texture.
+        self.begin_light_bake_save();
+        self.light_bake_key = next;
+        let Some(world) = self.world.as_ref() else {
+            return;
+        };
+        let size = crate::hw::LIGHTMAP_SIZE;
+        if let Some(key) = next {
+            if self.load_light_bake(key, &world.light, size) {
+                return;
+            }
+        }
+        clear_light(&self.queue, &world.light, size);
+    }
+
+    fn maybe_save_light_bake(&mut self) {
+        // Only finish in-flight work during play. A full light-map readback is
+        // started when leaving the level or quitting, never on a timer.
+        self.poll_light_bake();
+    }
+
+    /// Start a GPU→CPU copy. The frame is not blocked; [`poll_light_bake`]
+    /// finishes the sparse encode and disk write later.
+    fn begin_light_bake_save(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.poll_light_bake();
+            if self.light_bake_job.is_some() || !self.light_bake_dirty {
+                return;
+            }
+            let Some(key) = self.light_bake_key else {
+                return;
+            };
+            let Some(world) = self.world.as_ref() else {
+                return;
+            };
+            let size = crate::hw::LIGHTMAP_SIZE.max(1);
+            let bytes_per_row = (size * 8).div_ceil(256) * 256;
+            let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("doom_light_readback"),
+                size: u64::from(bytes_per_row) * u64::from(size),
+                usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+                mapped_at_creation: false,
+            });
+            let mut encoder = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("doom_light_readback_encoder"),
+                });
+            encoder.copy_texture_to_buffer(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &world.light,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyBufferInfo {
+                    buffer: &buffer,
+                    layout: wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(bytes_per_row),
+                        rows_per_image: Some(size),
+                    },
+                },
+                light_extent(size),
+            );
+            self.queue.submit(std::iter::once(encoder.finish()));
+            let (tx, rx) = std::sync::mpsc::channel();
+            buffer.slice(..).map_async(wgpu::MapMode::Read, move |result| {
+                let _ = tx.send(result);
+            });
+            self.light_bake_job = Some(LightBakeJob::Mapping {
+                key,
+                buffer,
+                bytes_per_row,
+                size,
+                rx,
+            });
+            // The staging buffer holds this snapshot; later samples mark dirty again.
+            self.light_bake_dirty = false;
+            self.light_bake_saved = Some(std::time::Instant::now());
+        }
+    }
+
+    fn poll_light_bake(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let job = match self.light_bake_job.take() {
+                Some(job) => job,
+                None => return,
+            };
+            match job {
+                LightBakeJob::Mapping {
+                    key,
+                    buffer,
+                    bytes_per_row,
+                    size,
+                    rx,
+                } => match rx.try_recv() {
+                    Ok(Ok(())) => {
+                        // Map reads stay on this thread — wgpu/Metal can hang if
+                        // another thread touches the mapped buffer.
+                        let mapped = buffer.slice(..).get_mapped_range();
+                        let texels = crate::light_bake::sparse_from_padded(
+                            &mapped,
+                            size,
+                            bytes_per_row,
+                        );
+                        drop(mapped);
+                        buffer.unmap();
+                        if texels.is_empty() {
+                            return;
+                        }
+                        let Some(path) = crate::light_bake::bake_path(key) else {
+                            log::warn!(
+                                "light bake not saved: no savegame directory (e{} m{})",
+                                key.episode,
+                                key.map
+                            );
+                            self.light_bake_dirty = true;
+                            return;
+                        };
+                        let handle = std::thread::spawn(move || {
+                            match crate::light_bake::write_bake(&path, key, size, &texels) {
+                                Ok(()) => log::info!(
+                                    "saved light bake {} texels to {}",
+                                    texels.len(),
+                                    path.display()
+                                ),
+                                Err(err) => log::warn!("light bake save failed: {err}"),
+                            }
+                        });
+                        self.light_bake_job = Some(LightBakeJob::Writing(handle));
+                    }
+                    Ok(Err(err)) => {
+                        log::warn!("light bake map failed: {err}");
+                        self.light_bake_dirty = true;
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                        self.light_bake_job = Some(LightBakeJob::Mapping {
+                            key,
+                            buffer,
+                            bytes_per_row,
+                            size,
+                            rx,
+                        });
+                    }
+                    Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                        log::warn!("light bake map disconnected");
+                        self.light_bake_dirty = true;
+                    }
+                },
+                LightBakeJob::Writing(handle) => {
+                    if handle.is_finished() {
+                        if let Err(err) = handle.join() {
+                            log::warn!("light bake writer panicked: {err:?}");
+                        }
+                    } else {
+                        self.light_bake_job = Some(LightBakeJob::Writing(handle));
+                    }
+                }
+            }
+        }
+    }
+
+    fn finish_light_bake_save(&mut self) {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            if self.light_bake_dirty {
+                self.begin_light_bake_save();
+            }
+            let deadline =
+                std::time::Instant::now() + std::time::Duration::from_secs(60);
+            while std::time::Instant::now() < deadline {
+                let _ = self.device.poll(wgpu::PollType::wait_indefinitely());
+                self.poll_light_bake();
+                match self.light_bake_job.take() {
+                    None => return,
+                    Some(LightBakeJob::Writing(handle)) => {
+                        if let Err(err) = handle.join() {
+                            log::warn!("light bake writer panicked: {err:?}");
+                        }
+                        return;
+                    }
+                    Some(mapping) => {
+                        self.light_bake_job = Some(mapping);
+                        std::thread::sleep(std::time::Duration::from_millis(2));
+                    }
+                }
+            }
+            if self.light_bake_job.is_some() {
+                log::warn!("light bake still in flight on shutdown");
+            }
+        }
+    }
+
+    fn load_light_bake(
+        &self,
+        key: crate::hw::LightBakeKey,
+        light: &wgpu::Texture,
+        size: u32,
+    ) -> bool {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let Some(path) = crate::light_bake::bake_path(key) else {
+                return false;
+            };
+            let Some(texels) = crate::light_bake::read_bake(&path, key, size) else {
+                return false;
+            };
+            if texels.is_empty() {
+                return false;
+            }
+            let (bytes, stride) = crate::light_bake::padded_from_sparse(&texels, size);
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: light,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &bytes,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(stride),
+                    rows_per_image: Some(size),
+                },
+                light_extent(size),
+            );
+            log::info!(
+                "loaded light bake {} texels from {}",
+                texels.len(),
+                path.display()
+            );
+            true
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (key, light, size);
+            false
+        }
     }
 
     fn ensure_ray_image(&mut self, width: u32, height: u32) {
@@ -1744,7 +2027,8 @@ impl GpuState {
                     depth_or_array_layers: 1,
                 },
             );
-            clear_light(&self.queue, &world.light, crate::hw::LIGHTMAP_SIZE);
+            // Atlas pixels can refresh without moving light rectangles. The
+            // light map is cleared only when packing resets (`light_reset`).
             self.queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &world.emission,

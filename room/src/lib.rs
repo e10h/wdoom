@@ -68,6 +68,8 @@ mod brightmaps {
 pub mod doom;
 pub mod gpu;
 #[cfg(not(target_arch = "wasm32"))]
+mod light_bake;
+#[cfg(not(target_arch = "wasm32"))]
 mod trace_ui;
 pub mod headless;
 pub mod hw;
