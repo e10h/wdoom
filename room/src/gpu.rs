@@ -101,15 +101,19 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 }
 "#;
 
-/// World-space mesh. `uv` tiles inside the atlas rectangle carried on the vertex.
+/// Rasterized level mesh. Play mode draws this with the light map; bake mode
+/// uses the ray pass instead when hardware ray queries are available.
 const WORLD_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
+    // x: minimum incoming light so dark rooms stay readable.
+    fill: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
+@group(0) @binding(3) var light_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
@@ -117,6 +121,7 @@ struct VertexInput {
     @location(2) atlas: vec4<f32>,
     @location(3) light: f32,
     @location(4) tint: vec3<f32>,
+    @location(5) light_uv: vec2<f32>,
 };
 
 struct VertexOutput {
@@ -125,6 +130,7 @@ struct VertexOutput {
     @location(1) atlas: vec4<f32>,
     @location(2) light: f32,
     @location(3) tint: vec3<f32>,
+    @location(4) light_uv: vec2<f32>,
 };
 
 @vertex
@@ -135,6 +141,7 @@ fn vs_world(in: VertexInput) -> VertexOutput {
     out.atlas = in.atlas;
     out.light = in.light;
     out.tint = in.tint;
+    out.light_uv = in.light_uv;
     return out;
 }
 
@@ -151,7 +158,18 @@ fn fs_world(in: VertexOutput) -> @location(0) vec4<f32> {
     if (color.a < 0.5) {
         discard;
     }
-    return vec4<f32>(color.rgb * in.tint * in.light, 1.0);
+    var incoming = vec3<f32>(in.light);
+    if (in.light_uv.x >= 0.0) {
+        let dims = textureDimensions(light_tex);
+        let coord = clamp(
+            vec2<i32>(in.light_uv * vec2<f32>(dims)),
+            vec2<i32>(0),
+            vec2<i32>(dims) - vec2<i32>(1),
+        );
+        incoming = textureLoad(light_tex, coord, 0).rgb;
+    }
+    incoming = max(incoming, vec3<f32>(camera.fill.x));
+    return vec4<f32>(color.rgb * in.tint * incoming, 1.0);
 }
 "#;
 
@@ -222,6 +240,9 @@ struct RayCam {
     // x: emissive scale, y: environment scale, z: bounce count.
     // w: 1 stores light on the surface, 0 averages the screen instead.
     light: vec4<f32>,
+    // x: minimum incoming light so dark rooms stay readable.
+    // y: 1 = play mode (sample light map only). z: rows reserved under the level.
+    fill: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -444,6 +465,32 @@ fn sun_ndotl(pos: vec3<f32>, n: vec3<f32>) -> f32 {
     return 0.0;
 }
 
+fn load_light_uv(uv: vec2<f32>) -> vec3<f32> {
+    if (uv.x < 0.0) {
+        return vec3<f32>(0.0);
+    }
+    let dims = textureDimensions(light_read);
+    let coord = clamp(
+        vec2<i32>(uv * vec2<f32>(dims)),
+        vec2<i32>(0),
+        vec2<i32>(dims) - vec2<i32>(1),
+    );
+    return textureLoad(light_read, coord, 0).rgb;
+}
+
+// Play mode: walls and floors use their baked texel. Moving things have no
+// texel, so they take the light of the floor (or wall) under them.
+fn sample_surface_light(surf: Surf) -> vec3<f32> {
+    if (surf.light_uv.x >= 0.0) {
+        return load_light_uv(surf.light_uv);
+    }
+    let below = trace(surf.pos + vec3<f32>(0.0, 2.0, 0.0), vec3<f32>(0.0, -1.0, 0.0));
+    if (below.hit && !below.sky && below.alpha >= 0.5 && below.light_uv.x >= 0.0) {
+        return load_light_uv(below.light_uv);
+    }
+    return vec3<f32>(0.0);
+}
+
 @fragment
 fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
     let vp = cam.viewport;
@@ -467,85 +514,94 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
         return FragOut(depth, vec4<f32>(primary.albedo, 1.0));
     }
 
-    // Incoming light only. The texture stays at full resolution and is
-    // applied after the light map is read.
-    var incoming = vec3<f32>(0.0);
-    let frame = u32(cam.right.w);
-    let px = u32(frag.x) + u32(frag.y) * 4096u;
     let emit_scale = cam.light.x;
-    let env_scale = cam.light.y;
-    let bounce_limit = clamp(i32(cam.light.z), 1, MAX_BOUNCES);
-    for (var s = 0u; s < SAMPLES; s = s + 1u) {
-        var rng = hash_u(px + frame * 9781u + s * 101u);
-        var throughput = vec3<f32>(1.0);
-        var surf = primary;
-        var dir = view_dir;
-        for (var bounce = 0; bounce < MAX_BOUNCES; bounce = bounce + 1) {
-            if (bounce >= bounce_limit) {
-                break;
+    let play = cam.fill.y > 0.5;
+    var incoming = vec3<f32>(0.0);
+    if (play) {
+        // One primary ray. Static surfaces read their texel; actors borrow
+        // the light under their feet so they stay stable while moving.
+        incoming = sample_surface_light(primary);
+    } else {
+        // Incoming light only. The texture stays at full resolution and is
+        // applied after the light map is read.
+        let frame = u32(cam.right.w);
+        let px = u32(frag.x) + u32(frag.y) * 4096u;
+        let env_scale = cam.light.y;
+        let bounce_limit = clamp(i32(cam.light.z), 1, MAX_BOUNCES);
+        for (var s = 0u; s < SAMPLES; s = s + 1u) {
+            var rng = hash_u(px + frame * 9781u + s * 101u);
+            var throughput = vec3<f32>(1.0);
+            var surf = primary;
+            var dir = view_dir;
+            for (var bounce = 0; bounce < MAX_BOUNCES; bounce = bounce + 1) {
+                if (bounce >= bounce_limit) {
+                    break;
+                }
+                if (surf.sky) {
+                    incoming += throughput * sky_light(dir) * env_scale;
+                    break;
+                }
+                // The surface we see keeps its own texel. Later hits contribute
+                // their color into the light arriving here.
+                let shade = select(vec3<f32>(1.0), surf.albedo, bounce > 0);
+                if (bounce > 0 && surf.emit > 0.0) {
+                    incoming += throughput * surf.albedo * surf.emit * emit_scale;
+                }
+                let ndl = sun_ndotl(surf.pos, surf.n);
+                if (ndl > 0.0) {
+                    incoming += throughput * shade * SUN_RGB * ndl * env_scale;
+                }
+                // Open sky above this point. Floors take most of it; walls take a little.
+                let above = trace(surf.pos + surf.n * RAY_BIAS, vec3<f32>(0.0, 1.0, 0.0));
+                if (above.sky) {
+                    let facing = max(surf.n.y, 0.0) * 0.5 + 0.25;
+                    incoming += throughput * shade * sky_light(vec3<f32>(0.0, 1.0, 0.0)) * facing * env_scale;
+                }
+                let beam = flashlight(surf.pos, surf.n, bounce > 0);
+                if (beam.x > 0.0) {
+                    incoming += throughput * shade * beam;
+                }
+                if (bounce + 1 >= bounce_limit) {
+                    break;
+                }
+                if (bounce > 0) {
+                    throughput = throughput * surf.albedo;
+                }
+                dir = hemisphere(surf.n, &rng);
+                let next = trace(surf.pos + surf.n * RAY_BIAS, dir);
+                if (!next.hit || next.alpha < 0.5) {
+                    break;
+                }
+                surf = next;
             }
-            if (surf.sky) {
-                incoming += throughput * sky_light(dir) * env_scale;
-                break;
-            }
-            // The surface we see keeps its own texel. Later hits contribute
-            // their color into the light arriving here.
-            let shade = select(vec3<f32>(1.0), surf.albedo, bounce > 0);
-            if (bounce > 0 && surf.emit > 0.0) {
-                incoming += throughput * surf.albedo * surf.emit * emit_scale;
-            }
-            let ndl = sun_ndotl(surf.pos, surf.n);
-            if (ndl > 0.0) {
-                incoming += throughput * shade * SUN_RGB * ndl * env_scale;
-            }
-            // Open sky above this point. Floors take most of it; walls take a little.
-            let above = trace(surf.pos + surf.n * RAY_BIAS, vec3<f32>(0.0, 1.0, 0.0));
-            if (above.sky) {
-                let facing = max(surf.n.y, 0.0) * 0.5 + 0.25;
-                incoming += throughput * shade * sky_light(vec3<f32>(0.0, 1.0, 0.0)) * facing * env_scale;
-            }
-            let beam = flashlight(surf.pos, surf.n, bounce > 0);
-            if (beam.x > 0.0) {
-                incoming += throughput * shade * beam;
-            }
-            if (bounce + 1 >= bounce_limit) {
-                break;
-            }
-            if (bounce > 0) {
-                throughput = throughput * surf.albedo;
-            }
-            dir = hemisphere(surf.n, &rng);
-            let next = trace(surf.pos + surf.n * RAY_BIAS, dir);
-            if (!next.hit || next.alpha < 0.5) {
-                break;
-            }
-            surf = next;
         }
-    }
-    incoming = incoming / f32(SAMPLES);
-    // Every screen pixel that lands on a texel is recorded. A later pass
-    // averages those pixels into the one texel. The picture is that texel,
-    // so light does not vary inside it.
-    if (cam.light.w > 0.5 && primary.light_uv.x >= 0.0) {
-        let dims = textureDimensions(light_read);
-        let coord = clamp(
-            vec2<i32>(primary.light_uv * vec2<f32>(dims)),
-            vec2<i32>(0),
-            vec2<i32>(dims) - vec2<i32>(1),
-        );
-        let texel = u32(coord.y) * u32(dims.x) + u32(coord.x);
-        let pix = u32(frag.x) + u32(frag.y) * u32(cam.viewport.z);
-        if (pix < arrayLength(&light_hits)) {
-            light_hits[pix].r = incoming.r;
-            light_hits[pix].g = incoming.g;
-            light_hits[pix].b = incoming.b;
-            light_hits[pix].packed = texel + 1u;
-        }
-        let old = textureLoad(light_read, coord, 0);
-        if (old.a > 0.0) {
+        incoming = incoming / f32(SAMPLES);
+        // Every screen pixel that lands on a texel is recorded. A later pass
+        // averages those pixels into the one texel. The picture is always that
+        // texel (black until the first store), so new surfaces do not wait on a
+        // noisy "allocate" period before they look like lightmap light.
+        if (cam.light.w > 0.5 && primary.light_uv.x >= 0.0) {
+            let dims = textureDimensions(light_read);
+            let coord = clamp(
+                vec2<i32>(primary.light_uv * vec2<f32>(dims)),
+                vec2<i32>(0),
+                vec2<i32>(dims) - vec2<i32>(1),
+            );
+            let texel = u32(coord.y) * u32(dims.x) + u32(coord.x);
+            let pix = u32(frag.x) + u32(frag.y) * u32(cam.viewport.z);
+            if (pix < arrayLength(&light_hits)) {
+                light_hits[pix].r = incoming.r;
+                light_hits[pix].g = incoming.g;
+                light_hits[pix].b = incoming.b;
+                light_hits[pix].packed = texel + 1u;
+            }
+            let old = textureLoad(light_read, coord, 0);
             incoming = old.rgb;
         }
     }
+    // Display-only floor. Stored light stays honest; the picture just never
+    // goes fully black.
+    incoming = max(incoming, vec3<f32>(cam.fill.x));
     let shaded = primary.albedo * incoming;
     let glow = primary.albedo * primary.emit * emit_scale;
     // The photons above still leave at full strength. On this surface the
@@ -584,8 +640,18 @@ struct WorldGpu {
     ray: Option<RayGpu>,
 }
 
+/// Walk the empty map and write light, or play with a cheap light-map sample.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TraceMode {
+    /// No actors. Path-trace and store light into the textures.
+    Bake,
+    /// Actors back. Plain raster of albedo × light map — no hardware RT.
+    Play,
+}
+
 /// Sliders for the path tracer.
 pub(crate) struct TraceSettings {
+    pub(crate) mode: TraceMode,
     /// Photons per masked texel. 4 matches the octree tracer's `texture_emission`.
     pub(crate) emission: f32,
     /// Scale on the sun and the sky.
@@ -597,18 +663,44 @@ pub(crate) struct TraceSettings {
     pub(crate) world_space: bool,
     /// Beam from the camera. World mode leaves it on the surfaces it hits.
     pub(crate) flashlight: f32,
+    /// Floor under incoming light when drawing, so pitch-black rooms stay visible.
+    pub(crate) min_light: f32,
+    /// Play mode renders at the classic Doom view size and nearest-upsamples.
+    pub(crate) doom_res: bool,
 }
 
 impl Default for TraceSettings {
     fn default() -> Self {
         Self {
+            mode: TraceMode::Play,
             emission: 40.0,
             environment: 1.0,
             bounces: 2,
             height: 720,
             world_space: true,
-            flashlight: 2.0,
+            flashlight: 0.0,
+            min_light: 0.08,
+            doom_res: false,
         }
+    }
+}
+
+impl TraceSettings {
+    pub(crate) fn baking(&self) -> bool {
+        self.mode == TraceMode::Bake
+    }
+
+    pub(crate) fn playing(&self) -> bool {
+        self.mode == TraceMode::Play
+    }
+
+    /// Bake hides things so light fills the empty map; play draws them again.
+    pub(crate) fn include_actors(&self) -> bool {
+        self.playing()
+    }
+
+    fn stores_light(&self) -> bool {
+        self.baking() && self.world_space
     }
 }
 
@@ -639,6 +731,18 @@ struct BlitGpu {
     pipeline: wgpu::RenderPipeline,
     layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
+    /// Chunkier upscale for classic Doom resolution play.
+    nearest: wgpu::Sampler,
+}
+
+/// Low-res raster target for play mode at native Doom view size.
+struct PlayImage {
+    _color: wgpu::Texture,
+    view: wgpu::TextureView,
+    _depth: wgpu::Texture,
+    depth_view: wgpu::TextureView,
+    bind: wgpu::BindGroup,
+    size: (u32, u32),
 }
 
 struct RayGpu {
@@ -690,6 +794,8 @@ pub struct GpuState {
     accum_key: Option<AccumKey>,
     /// Offscreen path-traced view, capped by [`TraceSettings::height`].
     ray_image: Option<RayImage>,
+    /// Offscreen raster play view when [`TraceSettings::doom_res`] is on.
+    play_image: Option<PlayImage>,
     blit: BlitGpu,
     accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
@@ -719,7 +825,11 @@ enum LightBakeJob {
         key: crate::hw::LightBakeKey,
         buffer: wgpu::Buffer,
         bytes_per_row: u32,
+        /// Full atlas edge length (for sparse texel indices).
         size: u32,
+        /// Copied band: `row_y` and `row_count` full-width rows.
+        row_y: u32,
+        row_count: u32,
         rx: std::sync::mpsc::Receiver<Result<(), wgpu::BufferAsyncError>>,
     },
     Writing(std::thread::JoinHandle<()>),
@@ -1086,6 +1196,7 @@ impl GpuState {
             accum_count: 0,
             accum_key: None,
             ray_image: None,
+            play_image: None,
             blit,
             accum,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1254,15 +1365,41 @@ impl GpuState {
         let vh = (rect[3] * surf_h).round().clamp(1.0, surf_h - vy);
         if let Some(world) = self.world.as_mut() {
             upload_mesh(world, &self.device, &self.queue, scene);
+            let cam = WorldUniform {
+                view_proj: scene.view_proj,
+                fill: [self.trace.min_light, 0.0, 0.0, 0.0],
+            };
             self.queue
-                .write_buffer(&world.uniform, 0, bytemuck::cast_slice(&scene.view_proj));
+                .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
         }
-        let (rw, rh) = ray_extent(vw, vh, self.trace.height);
+        // Play is plain raster × light map. Only bake builds rays / BLAS.
+        let baking = self.trace.baking();
+        let doom_res = self.trace.playing() && self.trace.doom_res;
+        let (rw, rh) = if baking {
+            ray_extent(vw, vh, self.trace.height)
+        } else if doom_res {
+            // Classic Doom 3D view size (usually 320×168 with the status bar).
+            unsafe {
+                (
+                    crate::doom::r_draw::viewwidth.max(1) as u32,
+                    crate::doom::r_draw::viewheight.max(1) as u32,
+                )
+            }
+        } else {
+            (vw as u32, vh as u32)
+        };
         self.traced = (rw, rh);
-        let screen_weight = self.begin_accumulation(scene, rw, rh);
-        let trace = self.prepare_rays(scene, 0.0, 0.0, rw as f32, rh as f32, screen_weight);
+        let screen_weight = if baking {
+            self.begin_accumulation(scene, rw, rh)
+        } else {
+            1.0
+        };
+        let trace = baking
+            && self.prepare_rays(scene, 0.0, 0.0, rw as f32, rh as f32, screen_weight);
         if trace {
             self.ensure_ray_image(rw, rh);
+        } else if doom_res {
+            self.ensure_play_image(rw, rh);
         } else if let Some(world) = self.world.as_mut() {
             if self.config.width != world.depth_size.0 || self.config.height != world.depth_size.1 {
                 let (depth, depth_view) =
@@ -1293,23 +1430,27 @@ impl GpuState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        let world_space = self.trace.world_space;
+        let store_light = self.trace.stores_light();
         if trace {
-            // World mode shows the texel. The screen average would keep a
-            // separate value in every pixel of that texel.
-            let image_weight = if world_space { 1.0 } else { screen_weight };
+            // World / bake shows the texel. The screen average would keep a
+            // separate value in every pixel of that texel. Play is one sample.
+            let image_weight = if store_light || self.trace.playing() {
+                1.0
+            } else {
+                screen_weight
+            };
             self.queue.write_buffer(
                 &self.accum.uniform,
                 0,
                 bytemuck::cast_slice(&[image_weight, 0.0, 0.0, 0.0]),
             );
-            if world_space {
+            if store_light {
                 if let Some(world) = self.world.as_ref() {
                     let params = BinParams {
                         pixels: rw * rh,
                         light_size: crate::hw::LIGHTMAP_SIZE,
                         slots: LIGHT_SLOTS,
-                        _pad: 0,
+                        voxel_rows: crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32,
                     };
                     self.queue.write_buffer(
                         &world.light_bins.uniform,
@@ -1327,7 +1468,7 @@ impl GpuState {
 
         if trace {
             if let Some(world) = self.world.as_mut() {
-                if world_space {
+                if store_light {
                     copy_light(
                         &mut encoder,
                         &world.light,
@@ -1376,7 +1517,7 @@ impl GpuState {
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
             draw_scene(&mut pass, world, scene, true);
             }
-            if world_space {
+            if store_light {
                 if let Some(world) = self.world.as_ref() {
                     {
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -1498,6 +1639,65 @@ impl GpuState {
             pass.set_pipeline(&self.blit.pipeline);
             pass.set_bind_group(0, &image.bind, &[]);
             pass.draw(0..6, 0..1);
+        } else if doom_res {
+            {
+                let image = self.play_image.as_ref().expect("play image");
+                let world = self.world.as_ref().expect("world");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("doom_play_pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &image.view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color {
+                                r: 0.02,
+                                g: 0.02,
+                                b: 0.03,
+                                a: 1.0,
+                            }),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &image.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(1.0),
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
+                draw_scene(&mut pass, world, scene, false);
+            }
+            {
+                let image = self.play_image.as_ref().expect("play image");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("doom_play_blit"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+                pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+                pass.set_pipeline(&self.blit.pipeline);
+                pass.set_bind_group(0, &image.bind, &[]);
+                pass.draw(0..6, 0..1);
+            }
         } else if let Some(world) = self.world.as_ref() {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_world_pass"),
@@ -1603,10 +1803,14 @@ impl GpuState {
                 return;
             };
             let size = crate::hw::LIGHTMAP_SIZE.max(1);
+            // Only the packed band — a full 4096² readback is ~128 MB and
+            // stalls quit even when almost every texel is empty.
+            let (row_y, row_count) = crate::hw::light_packed_rows().unwrap_or((0, size));
+            let row_count = row_count.max(1).min(size.saturating_sub(row_y));
             let bytes_per_row = (size * 8).div_ceil(256) * 256;
             let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("doom_light_readback"),
-                size: u64::from(bytes_per_row) * u64::from(size),
+                size: u64::from(bytes_per_row) * u64::from(row_count),
                 usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
                 mapped_at_creation: false,
             });
@@ -1619,7 +1823,11 @@ impl GpuState {
                 wgpu::TexelCopyTextureInfo {
                     texture: &world.light,
                     mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: row_y,
+                        z: 0,
+                    },
                     aspect: wgpu::TextureAspect::All,
                 },
                 wgpu::TexelCopyBufferInfo {
@@ -1627,10 +1835,14 @@ impl GpuState {
                     layout: wgpu::TexelCopyBufferLayout {
                         offset: 0,
                         bytes_per_row: Some(bytes_per_row),
-                        rows_per_image: Some(size),
+                        rows_per_image: Some(row_count),
                     },
                 },
-                light_extent(size),
+                wgpu::Extent3d {
+                    width: size,
+                    height: row_count,
+                    depth_or_array_layers: 1,
+                },
             );
             self.queue.submit(std::iter::once(encoder.finish()));
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1642,6 +1854,8 @@ impl GpuState {
                 buffer,
                 bytes_per_row,
                 size,
+                row_y,
+                row_count,
                 rx,
             });
             // The staging buffer holds this snapshot; later samples mark dirty again.
@@ -1663,15 +1877,19 @@ impl GpuState {
                     buffer,
                     bytes_per_row,
                     size,
+                    row_y,
+                    row_count,
                     rx,
                 } => match rx.try_recv() {
                     Ok(Ok(())) => {
                         // Map reads stay on this thread — wgpu/Metal can hang if
                         // another thread touches the mapped buffer.
                         let mapped = buffer.slice(..).get_mapped_range();
-                        let texels = crate::light_bake::sparse_from_padded(
+                        let texels = crate::light_bake::sparse_from_padded_rows(
                             &mapped,
                             size,
+                            row_y,
+                            row_count,
                             bytes_per_row,
                         );
                         drop(mapped);
@@ -1710,6 +1928,8 @@ impl GpuState {
                             buffer,
                             bytes_per_row,
                             size,
+                            row_y,
+                            row_count,
                             rx,
                         });
                     }
@@ -1807,6 +2027,42 @@ impl GpuState {
             let _ = (key, light, size);
             false
         }
+    }
+
+    fn ensure_play_image(&mut self, width: u32, height: u32) {
+        if self
+            .play_image
+            .as_ref()
+            .is_some_and(|image| image.size == (width, height))
+        {
+            return;
+        }
+        let format = self.config.format;
+        let color = ray_target(&self.device, width, height, format, true);
+        let view = color.create_view(&wgpu::TextureViewDescriptor::default());
+        let (depth, depth_view) = depth_target(&self.device, width, height);
+        let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("doom_play_blit_group"),
+            layout: &self.blit.layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.blit.nearest),
+                },
+            ],
+        });
+        self.play_image = Some(PlayImage {
+            _color: color,
+            view,
+            _depth: depth,
+            depth_view,
+            bind,
+            size: (width, height),
+        });
     }
 
     fn ensure_ray_image(&mut self, width: u32, height: u32) {
@@ -1931,6 +2187,11 @@ impl GpuState {
         }
     }
 
+    /// Play mode draws monsters and items; bake leaves the map empty.
+    pub fn include_actors(&self) -> bool {
+        self.trace.include_actors()
+    }
+
     /// Feed a window event to the path-tracer panel. `true` means egui used it.
     pub fn on_window_event(&mut self, event: &winit::event::WindowEvent) -> bool {
         #[cfg(not(target_arch = "wasm32"))]
@@ -1959,7 +2220,7 @@ impl GpuState {
             self.trace.emission,
             self.trace.environment,
             self.trace.bounces as f32,
-            if self.trace.world_space { 1.0 } else { 0.0 },
+            if self.trace.stores_light() { 1.0 } else { 0.0 },
         ];
         let GpuState {
             world: Some(world),
@@ -1997,6 +2258,12 @@ impl GpuState {
             ],
             viewport: [vx, vy, vw, vh],
             light,
+            fill: [
+                self.trace.min_light,
+                if self.trace.playing() { 1.0 } else { 0.0 },
+                crate::hw::VOXEL_LIGHT_ROWS.max(0) as f32,
+                0.0,
+            ],
         };
         queue.write_buffer(&ray.uniform, 0, bytemuck::bytes_of(&uniform));
         true
@@ -2126,6 +2393,10 @@ impl GpuState {
             address_mode_v: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
+        let light = world_light_read(&self.device, crate::hw::LIGHTMAP_SIZE);
+        let light_write = world_light_write(&self.device, crate::hw::LIGHTMAP_SIZE);
+        clear_light(&self.queue, &light, crate::hw::LIGHTMAP_SIZE);
+        let light_view = light.create_view(&wgpu::TextureViewDescriptor::default());
         let layout = self
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2133,7 +2404,7 @@ impl GpuState {
                 entries: &[
                     wgpu::BindGroupLayoutEntry {
                         binding: 0,
-                        visibility: wgpu::ShaderStages::VERTEX,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
@@ -2155,6 +2426,16 @@ impl GpuState {
                         binding: 2,
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        },
                         count: None,
                     },
                 ],
@@ -2180,6 +2461,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 2,
                     resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&light_view),
                 },
             ],
         });
@@ -2273,9 +2558,6 @@ impl GpuState {
             usage: index_usage,
             mapped_at_creation: false,
         });
-        let light = world_light_read(&self.device, crate::hw::LIGHTMAP_SIZE);
-        let light_write = world_light_write(&self.device, crate::hw::LIGHTMAP_SIZE);
-        clear_light(&self.queue, &light, crate::hw::LIGHTMAP_SIZE);
         let light_hits = light_hit_buffer(&self.device, LIGHT_HIT_CAP);
         let light_bins = create_light_bins(&self.device, &light, &light_write, &light_hits)
             .expect("light bin pipelines");
@@ -2304,7 +2586,7 @@ impl GpuState {
     }
 }
 
-const VERTEX_ATTRS: [wgpu::VertexAttribute; 5] = [
+const VERTEX_ATTRS: [wgpu::VertexAttribute; 6] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -2330,7 +2612,20 @@ const VERTEX_ATTRS: [wgpu::VertexAttribute; 5] = [
         offset: 40,
         shader_location: 4,
     },
+    // `_pad` sits at offset 52; light UVs follow it on the CPU vertex.
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 56,
+        shader_location: 5,
+    },
 ];
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
+struct WorldUniform {
+    view_proj: [[f32; 4]; 4],
+    fill: [f32; 4],
+}
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     wgpu::VertexBufferLayout {
@@ -2440,7 +2735,14 @@ impl AccumKey {
                 trace.bounces as f32,
                 trace.height as f32,
             ],
-            size: [width as f32, height as f32, trace.flashlight, 0.0],
+            size: [
+                width as f32,
+                height as f32,
+                trace.flashlight,
+                trace.min_light
+                    + if trace.playing() { 100.0 } else { 0.0 }
+                    + if trace.world_space { 10.0 } else { 0.0 },
+            ],
         }
     }
 
@@ -2713,10 +3015,19 @@ fn create_blit(device: &wgpu::Device, format: wgpu::TextureFormat) -> BlitGpu {
         address_mode_v: wgpu::AddressMode::ClampToEdge,
         ..Default::default()
     });
+    let nearest = device.create_sampler(&wgpu::SamplerDescriptor {
+        label: Some("doom_play_blit_nearest"),
+        mag_filter: wgpu::FilterMode::Nearest,
+        min_filter: wgpu::FilterMode::Nearest,
+        address_mode_u: wgpu::AddressMode::ClampToEdge,
+        address_mode_v: wgpu::AddressMode::ClampToEdge,
+        ..Default::default()
+    });
     BlitGpu {
         pipeline,
         layout,
         sampler,
+        nearest,
     }
 }
 
@@ -2800,6 +3111,8 @@ struct RayUniform {
     viewport: [f32; 4],
     /// x: emissive scale, y: environment scale, z: bounce count, w: world light.
     light: [f32; 4],
+    /// x: minimum display light.
+    fill: [f32; 4],
 }
 
 fn mesh_usage(ray: bool) -> (wgpu::BufferUsages, wgpu::BufferUsages) {
@@ -3048,7 +3361,10 @@ fn clear_light(queue: &wgpu::Queue, light: &wgpu::Texture, size: u32) {
     let side = size.max(1) as usize;
     let row = side * 8;
     let stride = row.div_ceil(256) * 256;
-    let zeros = vec![0u8; stride * side];
+    // rgba16float zeros. Alpha is the sample count: untouched stays 0 so the
+    // sparse bake only writes texels that actually got light (not the whole
+    // 4096² atlas). Display still reads rgb, so unlit surfaces stay black.
+    let pixels = vec![0u8; stride * side];
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
             texture: light,
@@ -3056,7 +3372,7 @@ fn clear_light(queue: &wgpu::Queue, light: &wgpu::Texture, size: u32) {
             origin: wgpu::Origin3d::ZERO,
             aspect: wgpu::TextureAspect::All,
         },
-        &zeros,
+        &pixels,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(stride as u32),
@@ -3123,7 +3439,7 @@ struct BinParams {
     pixels: u32,
     light_size: u32,
     slots: u32,
-    _pad: u32,
+    voxel_rows: u32,
 }
 
 const LIGHT_BIN_SHADER: &str = r#"
@@ -3138,7 +3454,7 @@ struct BinParams {
     pixels: u32,
     light_size: u32,
     slots: u32,
-    _pad: u32,
+    voxel_rows: u32,
 }
 
 @group(0) @binding(0) var<storage, read> light_hits: array<LightHit>;
@@ -3211,10 +3527,18 @@ fn cs_save(@builtin(global_invocation_id) id: vec3<u32>) {
     let old = textureLoad(light_read, coord, 0);
     // Every look at this texel adds one sample, whether the camera moved or not.
     // Walking the room keeps filling surfaces in.
-    let count = min(old.a, 1024.0);
-    let weight = 1.0 / (count + 1.0);
+    let voxel_y0 = i32(params.light_size) - i32(params.voxel_rows);
+    let moving = params.voxel_rows > 0u && coord.y >= voxel_y0;
+    // Actors move through light. Cap history so their patch keeps following
+    // the room instead of locking the first noisy looks forever.
+    let cap = select(1024.0, 24.0, moving);
+    let count = min(old.a, cap);
+    var weight = 1.0 / (count + 1.0);
+    if (moving) {
+        weight = max(weight, 0.15);
+    }
     let saved = mix(old.rgb, avg, weight);
-    textureStore(light_write, coord, vec4<f32>(saved, min(count + 1.0, 1024.0)));
+    textureStore(light_write, coord, vec4<f32>(saved, min(count + 1.0, cap)));
 }
 "#;
 
@@ -3707,6 +4031,7 @@ mod ray_test {
                 forward: [0.0, 0.0, 1.0, 0.0],
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
+                fill: [0.0, 0.0, 0.0, 0.0],
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 
@@ -4001,6 +4326,7 @@ mod ray_test {
                 forward: [0.0, 0.0, 1.0, 0.0],
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
+                fill: [0.0, 0.0, 0.0, 0.0],
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 
@@ -4302,6 +4628,7 @@ mod ray_test {
                 forward: [0.0, 0.0, 1.0, 0.0],
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 0.0, 1.0, 0.0],
+                fill: [0.0, 0.0, 0.0, 0.0],
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 

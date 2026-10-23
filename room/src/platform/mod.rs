@@ -323,7 +323,10 @@ pub extern "C" fn DG_DrawFrame() {
             return;
         };
         let result = if crate::hw::active() {
-            let scene = unsafe { crate::hw::build_scene() };
+            let actors = gpu.include_actors();
+            // Bake hides and freezes things; Play puts them back.
+            crate::hw::set_bake_safe(!actors);
+            let scene = unsafe { crate::hw::build_scene(actors) };
             let result = gpu.render_world(pixel_bytes, &scene);
             crate::hw::recycle(scene);
             result

@@ -19,19 +19,20 @@ pub struct BakeTexel {
 }
 
 /// Directory that already holds `.savegame` files, when Doom has opened one.
+/// Falls back to `~/.wdoom/light` so bakes still work if savegamedir is empty.
 fn bake_dir() -> Option<PathBuf> {
     unsafe {
         let dir = crate::doom::d_main::savegamedir;
-        if dir.is_null() {
-            return None;
+        if !dir.is_null() {
+            if let Ok(c) = std::ffi::CStr::from_ptr(dir).to_str() {
+                if !c.is_empty() {
+                    return Some(PathBuf::from(c));
+                }
+            }
         }
-        let c = std::ffi::CStr::from_ptr(dir);
-        let s = c.to_str().ok()?;
-        if s.is_empty() {
-            return None;
-        }
-        Some(PathBuf::from(s))
     }
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE"))?;
+    Some(PathBuf::from(home).join(".wdoom").join("light"))
 }
 
 pub fn bake_path(key: LightBakeKey) -> Option<PathBuf> {
@@ -115,14 +116,29 @@ pub fn read_bake(path: &Path, expect: LightBakeKey, size: u32) -> Option<Vec<Bak
     Some(texels)
 }
 
-/// Pull non-empty texels out of a tightly packed `Rgba16Float` download
-/// (`bytes_per_row` may be padded to 256).
+/// Pull sampled texels out of a tightly packed `Rgba16Float` download
+/// (`bytes_per_row` may be padded to 256). Alpha is the sample count; 0 means
+/// never hit, so those texels are skipped.
 pub fn sparse_from_padded(bytes: &[u8], size: u32, bytes_per_row: u32) -> Vec<BakeTexel> {
-    let side = size as usize;
+    sparse_from_padded_rows(bytes, size, 0, size, bytes_per_row)
+}
+
+/// Same as [`sparse_from_padded`], but the buffer holds `row_count` full-width
+/// rows starting at `row_y` in the atlas (so quit can skip unused bands).
+pub fn sparse_from_padded_rows(
+    bytes: &[u8],
+    map_size: u32,
+    row_y: u32,
+    row_count: u32,
+    bytes_per_row: u32,
+) -> Vec<BakeTexel> {
+    let side = map_size as usize;
     let stride = bytes_per_row as usize;
+    let rows = row_count as usize;
     let mut out = Vec::new();
-    for y in 0..side {
-        let row = &bytes[y * stride..y * stride + side * 8];
+    for ly in 0..rows {
+        let row = &bytes[ly * stride..ly * stride + side * 8];
+        let gy = row_y as usize + ly;
         for x in 0..side {
             let o = x * 8;
             let a = u16::from_le_bytes([row[o + 6], row[o + 7]]);
@@ -133,7 +149,7 @@ pub fn sparse_from_padded(bytes: &[u8], size: u32, bytes_per_row: u32) -> Vec<Ba
             let g = u16::from_le_bytes([row[o + 2], row[o + 3]]);
             let b = u16::from_le_bytes([row[o + 4], row[o + 5]]);
             out.push(BakeTexel {
-                index: (y * side + x) as u32,
+                index: (gy * side + x) as u32,
                 rgba: [r, g, b, a],
             });
         }

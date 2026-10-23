@@ -455,6 +455,11 @@ pub unsafe extern "C" fn P_NightmareRespawn(mobj: *mut mobj_t) {
 #[no_mangle]
 pub unsafe extern "C" fn P_MobjThinker(mobj: *mut mobj_t) {
     let mobj = &mut *mobj;
+    // Bake mode: leave the player alone, freeze everything else (monsters,
+    // missiles, animated props) so filling light is not a fight.
+    if crate::hw::bake_safe() && mobj.player.is_null() {
+        return;
+    }
     if mobj.momx != 0 || mobj.momy != 0 || mobj.flags & MF_SKULLFLY != 0 {
         P_XYMovement(mobj as *mut mobj_t);
         if is_sentinel(mobj.thinker.function) {

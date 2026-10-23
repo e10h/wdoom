@@ -1179,6 +1179,10 @@ pub unsafe extern "C" fn P_DamageMobj(
     if (*target).health <= 0 {
         return;
     }
+    // Bake mode is for walking the map, not dying in it.
+    if crate::hw::bake_safe() && !(*target).player.is_null() {
+        return;
+    }
     if ((*target).flags & MF_SKULLFLY) != 0 {
         (*target).momx = 0;
         (*target).momy = 0;

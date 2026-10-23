@@ -32,16 +32,35 @@ use crate::doom::r_things::{hw_psprite_lump, hw_sprite_lump};
 use crate::doom::w_wad::{W_CacheLumpNum, W_LumpLength};
 use crate::doom::z_zone::PU_CACHE;
 use crate::voxel::{self, VoxelMesh};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+/// Bake mode freezes monsters and blocks damage so you can walk the empty map.
+/// Starts false to match the default Play mode.
+static BAKE_SAFE: AtomicBool = AtomicBool::new(false);
+
+/// Call each frame from the draw path so the sim matches Bake vs Play.
+pub fn set_bake_safe(safe: bool) {
+    BAKE_SAFE.store(safe, Ordering::Relaxed);
+}
+
+/// True while light is being filled: no actor AI, no player damage.
+pub fn bake_safe() -> bool {
+    BAKE_SAFE.load(Ordering::Relaxed)
+}
+
 const FRAC: f32 = 65536.0;
+/// Soft cap on mesh size. Weapon quads are reserved so a busy map of voxel
+/// actors cannot push the gun out of the buffer.
+const MAX_SCENE_VERTS: usize = 2_000_000;
+const WEAPON_VERT_RESERVE: usize = 256;
 /// Light is stored on its own map, one rectangle per placed surface.
 pub const LIGHTMAP_SIZE: u32 = 4096;
 /// Map units covered by one light texel. One matches a Doom texture pixel.
 const LIGHT_SCALE: f32 = 1.0;
 /// Rows kept under the level packing so enemy and object voxels can store light.
-const VOXEL_LIGHT_ROWS: i32 = 1024;
+pub const VOXEL_LIGHT_ROWS: i32 = 1024;
 const FF_FULLBRIGHT: i32 = 0x8000;
 const MF_SHADOW: i32 = 0x00040000;
 /// `GS_LEVEL` in `g_game.rs`. The constant itself is private to that module.
@@ -61,8 +80,9 @@ pub struct Vertex {
     pub tint: [f32; 3],
     pub _pad: f32,
     /// Where this vertex lands in the light map. Negative skips storage.
-    /// Each placed wall, floor, and voxel face gets its own rectangle, so a
-    /// repeated texture does not share light with its other copies.
+    /// Each placed wall and floor gets its own rectangle so a repeated
+    /// texture does not share light with its other copies. Actors leave
+    /// this negative and borrow floor light in play mode.
     pub light_uv: [f32; 2],
 }
 
@@ -154,9 +174,12 @@ pub fn active() -> bool {
 
 /// Build the mesh for the camera `R_SetupFrame` just installed.
 ///
+/// `actors` adds monsters, items, and other things. Bake mode leaves them
+/// out so walking the map only fills light on the walls and floors.
+///
 /// # Safety
 /// Call only from the game thread, after map data and texture tables exist.
-pub unsafe fn build_scene() -> Scene {
+pub unsafe fn build_scene(actors: bool) -> Scene {
     let scratch = &mut *std::ptr::addr_of_mut!(SCRATCH);
     let atlas_upload = ensure_atlas(scratch);
     scratch.verts.clear();
@@ -178,13 +201,14 @@ pub unsafe fn build_scene() -> Scene {
     // Rebuilding here on every monster frame is what made the view hitch.
     light_begin();
     let (mut opaque_indices, mut world_indices) =
-        fill_scene(scratch, eye, ang, right, forward, cam_up);
+        fill_scene(scratch, eye, ang, right, forward, cam_up, actors);
     let commit = light_commit();
     if commit.rebuild {
         scratch.verts.clear();
         scratch.indices.clear();
         light_reuse();
-        (opaque_indices, world_indices) = fill_scene(scratch, eye, ang, right, forward, cam_up);
+        (opaque_indices, world_indices) =
+            fill_scene(scratch, eye, ang, right, forward, cam_up, actors);
     }
 
     let aspect = viewwidth as f32 / viewheight as f32;
@@ -232,6 +256,7 @@ unsafe fn fill_scene(
     right: [f32; 3],
     forward: [f32; 3],
     cam_up: [f32; 3],
+    actors: bool,
 ) -> (u32, u32) {
     if let Some(atlas) = scratch.atlas.as_ref() {
         push_sky(&mut scratch.verts, &mut scratch.indices, atlas, eye, ang);
@@ -242,32 +267,14 @@ unsafe fn fill_scene(
             &scratch.flats,
         );
     }
-    // Voxels allocate after the level so a new animation frame cannot move
-    // the rectangles under the walls and floors.
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sprites(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            right,
-            true,
-        );
-    }
-    let opaque_indices = scratch.indices.len() as u32;
-    if let Some(atlas) = scratch.atlas.as_ref() {
-        push_sprites(
-            &mut scratch.verts,
-            &mut scratch.indices,
-            atlas,
-            right,
-            false,
-        );
-    }
-    let world_indices = scratch.indices.len() as u32;
+    // Build the weapon first into a side buffer so actors cannot spend the
+    // vertex budget before the gun is added.
+    let mut weapon_verts = Vec::new();
+    let mut weapon_indices = Vec::new();
     if let Some(atlas) = scratch.atlas.as_ref() {
         push_weapon(
-            &mut scratch.verts,
-            &mut scratch.indices,
+            &mut weapon_verts,
+            &mut weapon_indices,
             atlas,
             eye,
             forward,
@@ -275,6 +282,40 @@ unsafe fn fill_scene(
             cam_up,
         );
     }
+    let actor_vert_limit = MAX_SCENE_VERTS.saturating_sub(weapon_verts.len().max(WEAPON_VERT_RESERVE));
+    // Voxels allocate after the level so a new animation frame cannot move
+    // the rectangles under the walls and floors.
+    if actors {
+        if let Some(atlas) = scratch.atlas.as_ref() {
+            push_sprites(
+                &mut scratch.verts,
+                &mut scratch.indices,
+                atlas,
+                right,
+                true,
+                actor_vert_limit,
+            );
+        }
+    }
+    let opaque_indices = scratch.indices.len() as u32;
+    if actors {
+        if let Some(atlas) = scratch.atlas.as_ref() {
+            push_sprites(
+                &mut scratch.verts,
+                &mut scratch.indices,
+                atlas,
+                right,
+                false,
+                actor_vert_limit,
+            );
+        }
+    }
+    let world_indices = scratch.indices.len() as u32;
+    let base = scratch.verts.len() as u32;
+    scratch.verts.extend_from_slice(&weapon_verts);
+    scratch
+        .indices
+        .extend(weapon_indices.iter().map(|i| i + base));
     (opaque_indices, world_indices)
 }
 
@@ -692,6 +733,7 @@ unsafe fn push_sky(
                 1.0,
                 [1.0; 3],
                 false,
+                MAX_SCENE_VERTS,
             );
         }
     }
@@ -934,6 +976,7 @@ unsafe fn push_wall(
         light,
         [1.0; 3],
         true,
+        MAX_SCENE_VERTS,
     );
 }
 
@@ -989,7 +1032,7 @@ fn fan(
     light: f32,
     baked: Option<PolyLight>,
 ) {
-    if poly.len() < 3 || verts.len() + poly.len() > 2_000_000 {
+    if poly.len() < 3 || verts.len() + poly.len() > MAX_SCENE_VERTS {
         return;
     }
     let base = verts.len() as u32;
@@ -1192,6 +1235,7 @@ unsafe fn push_sprites(
     atlas: &Atlas,
     right: [f32; 3],
     voxels: bool,
+    vert_limit: usize,
 ) {
     if sectors.is_null()
         || spritewidth.is_null()
@@ -1205,11 +1249,17 @@ unsafe fn push_sprites(
     }
     let player = std::ptr::addr_of_mut!(players[consoleplayer as usize]) as *mut std::ffi::c_void;
     for i in 0..numsectors.max(0) as usize {
+        if verts.len() >= vert_limit {
+            break;
+        }
         let sector = &*sectors.add(i);
         let mut thing = sector.thinglist as *mut mobj_t;
         let mut guard = 0;
         while !thing.is_null() && guard < 4096 {
             guard += 1;
+            if verts.len() >= vert_limit {
+                break;
+            }
             let th = &*thing;
             thing = th.snext;
             if !th.player.is_null() && th.player as *mut std::ffi::c_void == player {
@@ -1223,7 +1273,7 @@ unsafe fn push_sprites(
             }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
-                    push_voxel(verts, indices, atlas, th, &mesh, extra, light);
+                    push_voxel(verts, indices, atlas, th, &mesh, extra, light, vert_limit);
                 }
                 continue;
             }
@@ -1234,7 +1284,7 @@ unsafe fn push_sprites(
             else {
                 continue;
             };
-            push_billboard(verts, indices, atlas, th, lump, flip, right, light);
+            push_billboard(verts, indices, atlas, th, lump, flip, right, light, vert_limit);
         }
     }
 }
@@ -1249,6 +1299,7 @@ unsafe fn push_billboard(
     flip: bool,
     right: [f32; 3],
     light: f32,
+    vert_limit: usize,
 ) {
     if lump < 0 || lump as usize >= atlas.sprite_rects.len() {
         return;
@@ -1281,6 +1332,7 @@ unsafe fn push_billboard(
         light,
         [1.0; 3],
         false,
+        vert_limit,
     );
 }
 
@@ -1363,6 +1415,7 @@ unsafe fn push_weapon(
             1.0,
             [1.0; 3],
             false,
+            MAX_SCENE_VERTS,
         );
     }
 }
@@ -1375,6 +1428,7 @@ fn push_voxel(
     mesh: &Arc<VoxelMesh>,
     extra_yaw: f32,
     light: f32,
+    vert_limit: usize,
 ) {
     let yaw = (th.angle as f32) * std::f32::consts::TAU / 4294967296.0 + extra_yaw;
     let (s, c) = yaw.sin_cos();
@@ -1382,9 +1436,13 @@ fn push_voxel(
     let oy = fx(th.z);
     let oz = -fx(th.y);
     let uv = [[0.5, 0.5]; 4];
-    let thing_id = th as *const mobj_t as usize;
-    let mesh_id = Arc::as_ptr(mesh) as usize;
-    for (qi, quad) in mesh.quads.iter().enumerate() {
+    // Play mode lights actors from the floor under them. No light rectangle,
+    // so a walk cycle cannot thrash the light map.
+    let light_uv = [[-1.0, -1.0]; 4];
+    for quad in mesh.quads.iter() {
+        if verts.len() + 4 > vert_limit {
+            break;
+        }
         let mut p = [[0.0; 3]; 4];
         for i in 0..4 {
             let m = quad.p[i];
@@ -1395,7 +1453,6 @@ fn push_voxel(
             ];
         }
         let rgb = mesh.palette[quad.color as usize];
-        let light_uv = voxel_light_uvs(thing_id, mesh_id, qi, quad.p);
         push_quad_at(
             verts,
             indices,
@@ -1409,6 +1466,7 @@ fn push_voxel(
                 rgb[2] as f32 / 255.0,
             ],
             light_uv,
+            vert_limit,
         );
     }
 }
@@ -1422,13 +1480,24 @@ fn push_quad(
     light: f32,
     tint: [f32; 3],
     bake: bool,
+    vert_limit: usize,
 ) {
     let light_uv = if bake {
         light_uvs_for_quad(p, uv)
     } else {
         [[-1.0, -1.0]; 4]
     };
-    push_quad_at(verts, indices, p, uv, atlas, light, tint, light_uv);
+    push_quad_at(
+        verts,
+        indices,
+        p,
+        uv,
+        atlas,
+        light,
+        tint,
+        light_uv,
+        vert_limit,
+    );
 }
 
 fn push_quad_at(
@@ -1440,8 +1509,9 @@ fn push_quad_at(
     light: f32,
     tint: [f32; 3],
     light_uv: [[f32; 2]; 4],
+    vert_limit: usize,
 ) {
-    if verts.len() + 4 > 2_000_000 {
+    if verts.len() + 4 > vert_limit {
         return;
     }
     let base = verts.len() as u32;
@@ -1486,9 +1556,6 @@ struct Lightmap {
     placed: Vec<Option<(i32, i32, i32, i32)>>,
     /// Fingerprint of `placed`, so a bake file matches this packing.
     pack_hash: u64,
-    /// Light rectangle for one voxel face. Keyed by thing, mesh, and quad so
-    /// an animation frame does not repack the level.
-    voxels: Option<HashMap<(usize, usize, u32), Option<(i32, i32, i32, i32)>>>,
 }
 
 static mut LIGHTMAP: Lightmap = Lightmap {
@@ -1509,7 +1576,6 @@ static mut LIGHTMAP: Lightmap = Lightmap {
     reqs: Vec::new(),
     placed: Vec::new(),
     pack_hash: 0,
-    voxels: None,
 };
 
 fn light_begin() {
@@ -1520,7 +1586,6 @@ fn light_begin() {
             lm.level_key = key;
             lm.placed.clear();
             lm.pack_hash = 0;
-            lm.voxels = None;
             lm.scale = 1.0;
             lm.map_shelf = Shelf {
                 x: 0,
@@ -1542,7 +1607,6 @@ fn light_reuse() {
         lm.cursor = 0;
         lm.reqs.clear();
         lm.shelf = voxel_light_shelf();
-        lm.voxels = None;
     }
 }
 
@@ -1581,26 +1645,66 @@ fn light_bake_key() -> Option<LightBakeKey> {
     }
 }
 
+/// Rows of the light map that packing actually used: `(y, height)`.
+///
+/// Quit/save only downloads this band instead of the full 4096² atlas.
+pub fn light_packed_rows() -> Option<(u32, u32)> {
+    unsafe {
+        let lm = &*std::ptr::addr_of!(LIGHTMAP);
+        let mut min_y = i32::MAX;
+        let mut max_y = i32::MIN;
+        for rect in &lm.placed {
+            let Some((_, y, _, h)) = *rect else {
+                continue;
+            };
+            min_y = min_y.min(y);
+            max_y = max_y.max(y + h);
+        }
+        if min_y >= max_y {
+            return None;
+        }
+        let min_y = min_y.max(0) as u32;
+        let max_y = max_y.min(LIGHTMAP_SIZE as i32) as u32;
+        if max_y <= min_y {
+            return None;
+        }
+        Some((min_y, max_y - min_y))
+    }
+}
+
+/// FNV-1a so the bake filename stays the same across process runs.
+/// `DefaultHasher` is not stable between launches, so reloads never found the file.
 fn pack_hash(placed: &[Option<(i32, i32, i32, i32)>], scale: f32) -> u64 {
-    use std::hash::{Hash, Hasher};
-    let mut h = std::collections::hash_map::DefaultHasher::new();
-    LIGHTMAP_SIZE.hash(&mut h);
-    VOXEL_LIGHT_ROWS.hash(&mut h);
-    scale.to_bits().hash(&mut h);
-    placed.len().hash(&mut h);
+    fn fnv(h: &mut u64, bytes: &[u8]) {
+        for &b in bytes {
+            *h ^= u64::from(b);
+            *h = h.wrapping_mul(0x100000001b3);
+        }
+    }
+    fn fnv_u64(h: &mut u64, v: u64) {
+        fnv(h, &v.to_le_bytes());
+    }
+    fn fnv_i32(h: &mut u64, v: i32) {
+        fnv(h, &v.to_le_bytes());
+    }
+    let mut h = 0xcbf29ce484222325;
+    fnv_u64(&mut h, u64::from(LIGHTMAP_SIZE));
+    fnv_i32(&mut h, VOXEL_LIGHT_ROWS);
+    fnv_u64(&mut h, u64::from(scale.to_bits()));
+    fnv_u64(&mut h, placed.len() as u64);
     for rect in placed {
         match *rect {
             Some((x, y, w, hh)) => {
-                1u8.hash(&mut h);
-                x.hash(&mut h);
-                y.hash(&mut h);
-                w.hash(&mut h);
-                hh.hash(&mut h);
+                fnv(&mut h, &[1]);
+                fnv_i32(&mut h, x);
+                fnv_i32(&mut h, y);
+                fnv_i32(&mut h, w);
+                fnv_i32(&mut h, hh);
             }
-            None => 0u8.hash(&mut h),
+            None => fnv(&mut h, &[0]),
         }
     }
-    h.finish()
+    h
 }
 
 fn pack_lightmap(lm: &mut Lightmap) {
@@ -1617,9 +1721,8 @@ fn pack_lightmap(lm: &mut Lightmap) {
     lm.placed = placed;
     lm.scale = scale;
     lm.map_shelf = shelf;
-    // Voxels pack under the level, so a full map of walls cannot crowd them out.
+    // Rows under the level stay free of wall/floor packing.
     lm.shelf = voxel_light_shelf();
-    lm.voxels = None;
 }
 
 fn world_light_limit() -> i32 {
@@ -1752,22 +1855,6 @@ fn alloc_fit(w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
     }
 }
 
-fn alloc_voxel(thing: usize, mesh: usize, quad: u32, w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
-    unsafe {
-        let lm = &mut *std::ptr::addr_of_mut!(LIGHTMAP);
-        if lm.recording {
-            return None;
-        }
-        let key = (thing, mesh, quad);
-        if let Some(rect) = lm.voxels.as_ref().and_then(|map| map.get(&key).copied()) {
-            return rect;
-        }
-        let rect = place_one(w, h, lm.scale, 16, LIGHTMAP_SIZE as i32, &mut lm.shelf);
-        lm.voxels.get_or_insert_with(HashMap::new).insert(key, rect);
-        rect
-    }
-}
-
 fn place_one(
     w: i32,
     h: i32,
@@ -1809,26 +1896,6 @@ fn shelf_fit(w: i32, h: i32, limit_y: i32, shelf: &mut Shelf) -> Option<(i32, i3
     shelf.y = y;
     shelf.row_h = row_h.max(h);
     Some((x, y, w, h))
-}
-
-fn voxel_light_uvs(thing: usize, mesh: usize, quad: usize, model: [[f32; 3]; 4]) -> [[f32; 2]; 4] {
-    let width = dist3(model[0], model[3]).max(dist3(model[1], model[2]));
-    let height = dist3(model[0], model[1]).max(dist3(model[2], model[3]));
-    let Some((x, y, w, h)) = alloc_voxel(
-        thing,
-        mesh,
-        quad as u32,
-        (width / LIGHT_SCALE).ceil() as i32,
-        (height / LIGHT_SCALE).ceil() as i32,
-    ) else {
-        return [[-1.0, -1.0]; 4];
-    };
-    let corners = [[0.0, 0.0], [0.0, 1.0], [1.0, 1.0], [1.0, 0.0]];
-    let mut out = [[0.0; 2]; 4];
-    for i in 0..4 {
-        out[i] = light_uv_at(x, y, w, h, corners[i][0], corners[i][1]);
-    }
-    out
 }
 
 fn light_uv_at(x: i32, y: i32, w: i32, h: i32, tu: f32, tv: f32) -> [f32; 2] {

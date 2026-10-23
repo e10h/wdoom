@@ -5,7 +5,7 @@ use std::sync::Arc;
 use winit::event::WindowEvent;
 use winit::window::Window;
 
-use crate::gpu::TraceSettings;
+use crate::gpu::{TraceMode, TraceSettings};
 
 pub struct TraceUi {
     ctx: egui::Context,
@@ -81,38 +81,66 @@ impl TraceUi {
                 ui.label("Click the view for first person. F1 frees the mouse.");
                 ui.label("Option-Return toggles fullscreen.");
                 ui.horizontal(|ui| {
-                    ui.label("Accumulate in");
-                    ui.selectable_value(&mut controls.world_space, true, "World");
-                    ui.selectable_value(&mut controls.world_space, false, "Screen");
+                    ui.label("Mode");
+                    ui.selectable_value(&mut controls.mode, TraceMode::Bake, "Bake");
+                    ui.selectable_value(&mut controls.mode, TraceMode::Play, "Play");
                 });
-                ui.label(if controls.world_space {
-                    "Light stays in the texture and is saved for the next load of this map."
+                // Same frame as the click so the next game tic already freezes AI.
+                crate::hw::set_bake_safe(controls.baking());
+                ui.label(if controls.playing() {
+                    "Raster play: albedo × light map. No hardware ray tracing. Enemies are back."
                 } else {
-                    "Light builds up on the screen while you hold still."
+                    "Walk the empty map to fill light. Enemies are frozen and cannot hurt you."
                 });
                 ui.add(
-                    egui::Slider::new(&mut controls.emission, 0.0..=80.0)
-                        .text("Emissive photons"),
+                    egui::Slider::new(&mut controls.min_light, 0.0..=0.4)
+                        .text("Min light"),
                 );
-                ui.add(
-                    egui::Slider::new(&mut controls.environment, 0.0..=8.0)
-                        .text("Environment photons"),
-                );
-                ui.add(
-                    egui::Slider::new(&mut controls.flashlight, 0.0..=40.0)
-                        .text("Flashlight"),
-                );
-                ui.add(egui::Slider::new(&mut controls.bounces, 1..=8).text("Bounces"));
-                let mut height = controls.height as i32;
-                ui.add(egui::Slider::new(&mut height, 160..=1080).text("Ray height"));
-                controls.height = height as u32;
-                if controls.world_space {
-                    ui.label(format!("Tracing {}×{}, light in the texels", traced.0, traced.1));
+                if controls.baking() {
+                    ui.horizontal(|ui| {
+                        ui.label("Accumulate in");
+                        ui.selectable_value(&mut controls.world_space, true, "World");
+                        ui.selectable_value(&mut controls.world_space, false, "Screen");
+                    });
+                    ui.label(if controls.world_space {
+                        "Light stays in the texture and is saved for the next load of this map."
+                    } else {
+                        "Light builds up on the screen while you hold still."
+                    });
+                    ui.add(
+                        egui::Slider::new(&mut controls.emission, 0.0..=80.0)
+                            .text("Emissive photons"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut controls.environment, 0.0..=8.0)
+                            .text("Environment photons"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut controls.flashlight, 0.0..=40.0)
+                            .text("Flashlight"),
+                    );
+                    ui.add(egui::Slider::new(&mut controls.bounces, 1..=8).text("Bounces"));
+                    let mut height = controls.height as i32;
+                    ui.add(egui::Slider::new(&mut height, 160..=1080).text("Ray height"));
+                    controls.height = height as u32;
+                    if controls.world_space {
+                        ui.label(format!("Tracing {}×{}, light in the texels", traced.0, traced.1));
+                    } else {
+                        ui.label(format!(
+                            "Tracing {}×{}, {} accumulated",
+                            traced.0, traced.1, samples
+                        ));
+                    }
                 } else {
-                    ui.label(format!(
-                        "Tracing {}×{}, {} accumulated",
-                        traced.0, traced.1, samples
-                    ));
+                    ui.checkbox(&mut controls.doom_res, "Doom resolution");
+                    ui.label(if controls.doom_res {
+                        format!(
+                            "Raster play {}×{} (nearest upscale, classic view size)",
+                            traced.0, traced.1
+                        )
+                    } else {
+                        format!("Raster play {}×{}", traced.0, traced.1)
+                    });
                 }
             });
         if let Some(shown) = shown {
