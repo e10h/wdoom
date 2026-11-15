@@ -36,6 +36,30 @@ compatibility before a module is declared ported.
 
 Sound effects and music are implemented via [rodio](https://github.com/RustAudio/rodio). SFX uses stereo panning; music uses the [Roland SC-55 SoundFont](https://github.com/GuihongWang/SC55Soundfont) via [rustysynth](https://github.com/sinshu/rustysynth). A custom soundfont can be specified with `-sf2 <path>`.
 
+## Browser version
+
+Build and serve from the repository root:
+
+```bash
+wasm-pack build room --target web --out-dir ../web/pkg --release --no-opt
+python3 -m http.server 8000 --directory web
+```
+
+Open http://localhost:8000 and start Episode 1. The browser fetches compatible
+bakes from `web/light/` using the level's atlas fingerprint. Unbaked texels
+use Doom sector lighting.
+
+The local `web/light/` entries link directly to native `.savegame/` files, so
+a browser reload reads the native bake without a separate export or substitute.
+Native saves publish atomically after the complete file is written.
+
+Bake mode **resumes existing samples**, including any lighting artifacts already
+saved. After a lighting/mapping fix, use **Restart bake (keeps backup)** in the
+native Bake panel to start clean. This preserves the old native file as
+`*.rmlt.backup-<timestamp>` before clearing in-memory accumulation. Walk/bake the
+level natively, save/quit normally, then reload the web view. No restart occurs
+automatically.
+
 ## Project layout
 
 ```

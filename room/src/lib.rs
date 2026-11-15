@@ -78,6 +78,8 @@ pub mod types;
 pub mod voxel;
 #[cfg(target_arch = "wasm32")]
 pub mod web;
+#[cfg(target_arch = "wasm32")]
+mod web_light;
 
 // Re-export `dhat` when the `dhat-heap` Cargo feature is enabled so binaries
 // can install the heap profiler without listing `dhat` as a direct dependency.

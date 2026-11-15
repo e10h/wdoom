@@ -1,0 +1,318 @@
+use super::*;
+use wgpu::util::DeviceExt;
+
+// Opposite Doom sidedefs occupy the same plane, with independent materials
+// and light UVs. Depth testing cannot choose which sidedef faces the player.
+#[test]
+fn opposite_wall_materials_stay_on_their_own_side() {
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .await
+            .expect("GPU adapter");
+        let (device, queue) = adapter
+            .request_device(&Default::default())
+            .await
+            .expect("GPU device");
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("production world shader"),
+            source: wgpu::ShaderSource::Wgsl(WORLD_SHADER.into()),
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("opposite sidedef regression"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_world"),
+                buffers: &[vertex_layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_world"),
+                targets: &[Some(wgpu::TextureFormat::Rgba8Unorm.into())],
+                compilation_options: Default::default(),
+            }),
+            primitive: Default::default(),
+            depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less)),
+            multisample: Default::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            tex.as_image_copy(),
+            &[255; 4],
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(4),
+                rows_per_image: Some(1),
+            },
+            tex.size(),
+        );
+        let tex_view = tex.create_view(&Default::default());
+        let light = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("baked or untouched light"),
+            size: tex.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: tex.format(),
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let light_view = light.create_view(&Default::default());
+        let emission = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("emissive surface mask"),
+            size: tex.size(),
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let emission_view = emission.create_view(&Default::default());
+        let sampler = device.create_sampler(&Default::default());
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 80,
+            mapped_at_creation: false,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        let bind = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&tex_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&light_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&emission_view),
+                },
+            ],
+        });
+        let output = device.create_texture(&wgpu::TextureDescriptor {
+            label: None,
+            size: wgpu::Extent3d {
+                width: 16,
+                height: 16,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = output.create_view(&Default::default());
+        let (_depth, depth) = depth_target(&device, 16, 16);
+        let read = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 256,
+            mapped_at_creation: false,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+        });
+        // A baked white texel, an untouched texel, and a baked black texel.
+        for glow in [0u8, 255] {
+            queue.write_texture(
+                emission.as_image_copy(),
+                &[glow],
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(1),
+                    rows_per_image: Some(1),
+                },
+                emission.size(),
+            );
+            for sample in [[255, 255, 255, 255], [0, 0, 0, 0], [0, 0, 0, 255]] {
+                queue.write_texture(
+                    light.as_image_copy(),
+                    &sample,
+                    wgpu::TexelCopyBufferLayout {
+                        offset: 0,
+                        bytes_per_row: Some(4),
+                        rows_per_image: Some(1),
+                    },
+                    light.size(),
+                );
+                for distance in [32.0, 512.0, 4096.0] {
+                    for reverse_order in [false, true] {
+                        for opposite_view in [false, true] {
+                            let near = 1.0;
+                            let far = 16000.0;
+                            let nf = 1.0 / (near - far);
+                            let sign = if opposite_view { -1.0 } else { 1.0 };
+                            let camera = WorldUniform {
+                                view_proj: [
+                                    [sign, 0.0, 0.0, 0.0],
+                                    [0.0, 1.0, 0.0, 0.0],
+                                    [0.0, 0.0, sign * far * nf, -sign],
+                                    [
+                                        0.0,
+                                        0.0,
+                                        far * near * nf
+                                            + if opposite_view {
+                                                -2.0 * distance * far * nf
+                                            } else {
+                                                0.0
+                                            },
+                                        if opposite_view { 2.0 * distance } else { 0.0 },
+                                    ],
+                                ],
+                                fill: [0.0, 40.0, 0.0, 0.0],
+                            };
+                            queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&camera));
+                            let mut vertices = Vec::new();
+                            for back in if reverse_order {
+                                [false, true]
+                            } else {
+                                [true, false]
+                            } {
+                                let points = [
+                                    [-distance, -distance, -distance],
+                                    [-distance, distance, -distance],
+                                    [distance, distance, -distance],
+                                    [distance, -distance, -distance],
+                                ];
+                                for i in if back {
+                                    [0, 2, 1, 0, 3, 2]
+                                } else {
+                                    [0, 1, 2, 0, 2, 3]
+                                } {
+                                    vertices.push(crate::hw::Vertex {
+                                        pos: points[i],
+                                        uv: [0.5; 2],
+                                        atlas: [0.0, 0.0, 1.0, 1.0],
+                                        light: 1.0,
+                                        tint: if back { [1.0, 0.0, 0.0] } else { [0.5; 3] },
+                                        _pad: -1.0,
+                                        light_uv: [0.5; 2],
+                                    });
+                                }
+                            }
+                            let buffer =
+                                device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                                    label: None,
+                                    contents: bytemuck::cast_slice(&vertices),
+                                    usage: wgpu::BufferUsages::VERTEX,
+                                });
+                            let mut encoder = device.create_command_encoder(&Default::default());
+                            {
+                                let mut pass =
+                                    encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                                        label: None,
+                                        color_attachments: &[Some(
+                                            wgpu::RenderPassColorAttachment {
+                                                view: &view,
+                                                depth_slice: None,
+                                                resolve_target: None,
+                                                ops: wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                                                    store: wgpu::StoreOp::Store,
+                                                },
+                                            },
+                                        )],
+                                        depth_stencil_attachment: Some(
+                                            wgpu::RenderPassDepthStencilAttachment {
+                                                view: &depth,
+                                                depth_ops: Some(wgpu::Operations {
+                                                    load: wgpu::LoadOp::Clear(1.0),
+                                                    store: wgpu::StoreOp::Store,
+                                                }),
+                                                stencil_ops: None,
+                                            },
+                                        ),
+                                        timestamp_writes: None,
+                                        occlusion_query_set: None,
+                                        multiview_mask: None,
+                                    });
+                                pass.set_pipeline(&pipeline);
+                                pass.set_bind_group(0, &bind, &[]);
+                                pass.set_vertex_buffer(0, buffer.slice(..));
+                                pass.draw(0..12, 0..1);
+                            }
+                            encoder.copy_texture_to_buffer(
+                                wgpu::TexelCopyTextureInfo {
+                                    origin: wgpu::Origin3d { x: 8, y: 8, z: 0 },
+                                    ..output.as_image_copy()
+                                },
+                                wgpu::TexelCopyBufferInfo {
+                                    buffer: &read,
+                                    layout: wgpu::TexelCopyBufferLayout {
+                                        offset: 0,
+                                        bytes_per_row: Some(256),
+                                        rows_per_image: Some(1),
+                                    },
+                                },
+                                wgpu::Extent3d {
+                                    width: 1,
+                                    height: 1,
+                                    depth_or_array_layers: 1,
+                                },
+                            );
+                            queue.submit([encoder.finish()]);
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            read.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+                                tx.send(r).unwrap();
+                            });
+                            device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+                            rx.recv().unwrap().unwrap();
+                            let px = read.slice(..).get_mapped_range()[..4].to_vec();
+                            read.unmap();
+                            let expected = if glow != 0 {
+                                if sample == [0, 0, 0, 255] {
+                                    if opposite_view {
+                                        [124, 0, 0, 255]
+                                    } else {
+                                        [121, 121, 121, 255]
+                                    }
+                                } else if opposite_view {
+                                    [255, 0, 0, 255]
+                                } else {
+                                    [188, 188, 188, 255]
+                                }
+                            } else if sample == [0, 0, 0, 255] {
+                                [0, 0, 0, 255]
+                            } else if opposite_view {
+                                [255, 0, 0, 255]
+                            } else {
+                                [128, 128, 128, 255]
+                            };
+                            assert_eq!(px, expected, "wrong sidedef at distance {distance}, reverse_order={reverse_order}, opposite_view={opposite_view}");
+                        }
+                    }
+                }
+            }
+        }
+    });
+}

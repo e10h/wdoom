@@ -106,7 +106,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const WORLD_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
-    // x: minimum incoming light so dark rooms stay readable.
+    // x: minimum incoming light; y: emission strength for surface glow.
     fill: vec4<f32>,
 };
 
@@ -114,6 +114,7 @@ struct Camera {
 @group(0) @binding(1) var atlas_tex: texture_2d<f32>;
 @group(0) @binding(2) var atlas_samp: sampler;
 @group(0) @binding(3) var light_tex: texture_2d<f32>;
+@group(0) @binding(4) var emit_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
@@ -122,6 +123,7 @@ struct VertexInput {
     @location(3) light: f32,
     @location(4) tint: vec3<f32>,
     @location(5) light_uv: vec2<f32>,
+    @location(6) surface: f32,
 };
 
 struct VertexOutput {
@@ -131,6 +133,7 @@ struct VertexOutput {
     @location(2) light: f32,
     @location(3) tint: vec3<f32>,
     @location(4) light_uv: vec2<f32>,
+    @location(5) @interpolate(flat) surface: f32,
 };
 
 @vertex
@@ -142,11 +145,17 @@ fn vs_world(in: VertexInput) -> VertexOutput {
     out.light = in.light;
     out.tint = in.tint;
     out.light_uv = in.light_uv;
+    out.surface = in.surface;
     return out;
 }
 
 @fragment
-fn fs_world(in: VertexOutput) -> @location(0) vec4<f32> {
+fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
+    // Wall quads face their Doom sector clockwise. The opposite sidedef
+    // can occupy this exact plane, so depth testing alone cannot select it.
+    if (in.surface < -0.5 && front) {
+        discard;
+    }
     let tile = fract(in.uv);
     let atlas_uv = vec2<f32>(
         mix(in.atlas.x, in.atlas.z, tile.x),
@@ -166,10 +175,23 @@ fn fs_world(in: VertexOutput) -> @location(0) vec4<f32> {
             vec2<i32>(0),
             vec2<i32>(dims) - vec2<i32>(1),
         );
-        incoming = textureLoad(light_tex, coord, 0).rgb;
+        // Alpha stores the sample count. An incomplete or loading bake has
+        // empty texels; keep sector lighting there instead of painting black.
+        let baked = textureLoad(light_tex, coord, 0);
+        if (baked.a > 0.0) {
+            incoming = baked.rgb;
+        }
     }
     incoming = max(incoming, vec3<f32>(camera.fill.x));
-    return vec4<f32>(color.rgb * in.tint * incoming, 1.0);
+    let albedo = color.rgb * in.tint;
+    let shaded = albedo * incoming;
+    let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
+    let glow = albedo * emission * camera.fill.y;
+    // Same display-only self-glow as the native ray view: lift the emitter
+    // without changing its baked light or washing away its texture pattern.
+    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
+    let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
+    return vec4<f32>(radiance, 1.0);
 }
 "#;
 
@@ -381,10 +403,10 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
         return surf;
     }
     let prim = hit.primitive_index * 3u;
-    let i0 = indices[prim];
-    let i1 = indices[prim + 1u];
-    let i2 = indices[prim + 2u];
-    let b = vec3<f32>(
+    var i0 = indices[prim];
+    var i1 = indices[prim + 1u];
+    var i2 = indices[prim + 2u];
+    var b = vec3<f32>(
         1.0 - hit.barycentrics.x - hit.barycentrics.y,
         hit.barycentrics.x,
         hit.barycentrics.y,
@@ -393,6 +415,30 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     let p1 = vec3<f32>(attr(i1, 0u), attr(i1, 1u), attr(i1, 2u));
     let p2 = vec3<f32>(attr(i2, 0u), attr(i2, 1u), attr(i2, 2u));
     var n = normalize(cross(p1 - p0, p2 - p0));
+    let surface = attr(i0, 13u);
+    if (surface < -1.5 && dot(n, dir) < 0.0) {
+        // Metal's committed ray query may select either coincident triangle.
+        // The mesh records the opposite quad so all material and light UVs
+        // can be resolved to the sidedef facing this ray, on every backend.
+        let opposite = u32(-surface - 2.0);
+        let q0 = vec3<f32>(attr(opposite, 0u), attr(opposite, 1u), attr(opposite, 2u));
+        let q1 = vec3<f32>(attr(opposite + 1u, 0u), attr(opposite + 1u, 1u), attr(opposite + 1u, 2u));
+        let q3 = vec3<f32>(attr(opposite + 3u, 0u), attr(opposite + 3u, 1u), attr(opposite + 3u, 2u));
+        let local = origin + dir * hit.t - q0;
+        let ds = q3 - q0;
+        let dt = q1 - q0;
+        let st = clamp(vec2<f32>(dot(local, ds) / dot(ds, ds), dot(local, dt) / dot(dt, dt)), vec2<f32>(0.0), vec2<f32>(1.0));
+        i0 = opposite;
+        if (st.y >= st.x) {
+            i1 = opposite + 1u;
+            i2 = opposite + 2u;
+            b = vec3<f32>(1.0 - st.y, st.y - st.x, st.x);
+        } else {
+            i1 = opposite + 2u;
+            i2 = opposite + 3u;
+            b = vec3<f32>(1.0 - st.x, st.y, st.x - st.y);
+        }
+    }
     if (dot(n, dir) > 0.0) {
         n = -n;
     }
@@ -622,7 +668,7 @@ struct WorldGpu {
     /// Fresh incoming light, one record per ray-target pixel.
     light_hits: wgpu::Buffer,
     /// Adds every pixel on a texel into that texel, then writes the average.
-    light_bins: LightBins,
+    light_bins: Option<LightBins>,
     atlas_size: u32,
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
@@ -679,7 +725,7 @@ impl Default for TraceSettings {
             height: 720,
             world_space: true,
             flashlight: 0.0,
-            min_light: 0.08,
+            min_light: 0.4,
             doom_res: false,
         }
     }
@@ -1367,7 +1413,7 @@ impl GpuState {
             upload_mesh(world, &self.device, &self.queue, scene);
             let cam = WorldUniform {
                 view_proj: scene.view_proj,
-                fill: [self.trace.min_light, 0.0, 0.0, 0.0],
+                fill: [self.trace.min_light, self.trace.emission, 0.0, 0.0],
             };
             self.queue
                 .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
@@ -1453,7 +1499,7 @@ impl GpuState {
                         voxel_rows: crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32,
                     };
                     self.queue.write_buffer(
-                        &world.light_bins.uniform,
+                        &world.light_bins.as_ref().expect("native light bins").uniform,
                         0,
                         bytemuck::bytes_of(&params),
                     );
@@ -1476,7 +1522,7 @@ impl GpuState {
                         crate::hw::LIGHTMAP_SIZE,
                     );
                     encoder.clear_buffer(&world.light_hits, 0, None);
-                    encoder.clear_buffer(&world.light_bins.bins, 0, None);
+                    encoder.clear_buffer(&world.light_bins.as_ref().expect("native light bins").bins, 0, None);
                 }
                 build_rays(world, scene, &mut encoder);
             }
@@ -1524,8 +1570,8 @@ impl GpuState {
                             label: Some("doom_light_bin"),
                             timestamp_writes: None,
                         });
-                        pass.set_pipeline(&world.light_bins.bin_pipeline);
-                        pass.set_bind_group(0, &world.light_bins.bind, &[]);
+                        pass.set_pipeline(&world.light_bins.as_ref().expect("native light bins").bin_pipeline);
+                        pass.set_bind_group(0, &world.light_bins.as_ref().expect("native light bins").bind, &[]);
                         pass.dispatch_workgroups((rw * rh + 63) / 64, 1, 1);
                     }
                     {
@@ -1533,8 +1579,8 @@ impl GpuState {
                             label: Some("doom_light_save"),
                             timestamp_writes: None,
                         });
-                        pass.set_pipeline(&world.light_bins.save_pipeline);
-                        pass.set_bind_group(0, &world.light_bins.bind, &[]);
+                        pass.set_pipeline(&world.light_bins.as_ref().expect("native light bins").save_pipeline);
+                        pass.set_bind_group(0, &world.light_bins.as_ref().expect("native light bins").bind, &[]);
                         pass.dispatch_workgroups(LIGHT_SLOTS / 256, 1, 1);
                     }
                     copy_light(
@@ -2024,7 +2070,11 @@ impl GpuState {
         }
         #[cfg(target_arch = "wasm32")]
         {
-            let _ = (key, light, size);
+            crate::web_light::load(key, light.clone(), self.queue.clone(), size, move || {
+                crate::platform::GPU.with_borrow(|gpu| {
+                    gpu.as_ref().is_some_and(|gpu| gpu.light_bake_key == Some(key))
+                })
+            });
             false
         }
     }
@@ -2143,6 +2193,31 @@ impl GpuState {
         weight
     }
 
+    /// Explicitly restart native accumulation, retaining the user's old bake.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn restart_light_bake(&mut self) {
+        self.finish_light_bake_save();
+        if let Some(path) = self.light_bake_key.and_then(crate::light_bake::bake_path) {
+            if path.exists() {
+                let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default().as_nanos();
+                let backup = path.with_extension(format!("rmlt.backup-{stamp}"));
+                if let Err(error) = std::fs::copy(&path, &backup) {
+                    log::error!("could not preserve native bake; restart cancelled: {error}");
+                    return;
+                }
+                log::info!("preserved native bake at {}", backup.display());
+            }
+        }
+        if let Some(world) = self.world.as_ref() {
+            clear_light(&self.queue, &world.light, crate::hw::LIGHTMAP_SIZE);
+        }
+        self.accum_count = 0;
+        self.accum_key = None;
+        self.light_bake_dirty = true;
+        log::info!("restarted native light accumulation from zero samples");
+    }
+
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2156,7 +2231,7 @@ impl GpuState {
                 accum_count,
                 ..
             } = self;
-            ui.paint(
+            let restart_bake = ui.paint(
                 device,
                 queue,
                 encoder,
@@ -2168,6 +2243,9 @@ impl GpuState {
                 *accum_count,
             );
             crate::platform::maintain_pointer_capture();
+            if restart_bake {
+                self.restart_light_bake();
+            }
         }
         #[cfg(target_arch = "wasm32")]
         {
@@ -2397,6 +2475,7 @@ impl GpuState {
         let light_write = world_light_write(&self.device, crate::hw::LIGHTMAP_SIZE);
         clear_light(&self.queue, &light, crate::hw::LIGHTMAP_SIZE);
         let light_view = light.create_view(&wgpu::TextureViewDescriptor::default());
+        let emission_view = emission_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let layout = self
             .device
             .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -2438,6 +2517,16 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
                 ],
             });
         let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2465,6 +2554,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 3,
                     resource: wgpu::BindingResource::TextureView(&light_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&emission_view),
                 },
             ],
         });
@@ -2559,8 +2652,13 @@ impl GpuState {
             mapped_at_creation: false,
         });
         let light_hits = light_hit_buffer(&self.device, LIGHT_HIT_CAP);
-        let light_bins = create_light_bins(&self.device, &light, &light_write, &light_hits)
-            .expect("light bin pipelines");
+        // Browsers display uploaded bakes; the native baking pipeline blocks
+        // on validation and requires compute limits unavailable on WebGL.
+        #[cfg(not(target_arch = "wasm32"))]
+        let light_bins = Some(create_light_bins(&self.device, &light, &light_write, &light_hits)
+            .expect("light bin pipelines"));
+        #[cfg(target_arch = "wasm32")]
+        let light_bins = None;
         self.world = Some(WorldGpu {
             atlas: atlas_tex,
             emission: emission_tex,
@@ -2586,7 +2684,7 @@ impl GpuState {
     }
 }
 
-const VERTEX_ATTRS: [wgpu::VertexAttribute; 6] = [
+const VERTEX_ATTRS: [wgpu::VertexAttribute; 7] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -2612,7 +2710,12 @@ const VERTEX_ATTRS: [wgpu::VertexAttribute; 6] = [
         offset: 40,
         shader_location: 4,
     },
-    // `_pad` sits at offset 52; light UVs follow it on the CPU vertex.
+    // Surface tag: -1 directed wall, 0 ordinary geometry, +1 sky.
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 52,
+        shader_location: 6,
+    },
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x2,
         offset: 56,
@@ -3859,6 +3962,9 @@ fn web_canvas_size() -> PhysicalSize<u32> {
     }
 }
 
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod raster_test;
+
 #[cfg(test)]
 mod ray_test {
     use super::*;
@@ -4758,3 +4864,6 @@ mod ray_test {
         });
     }
 }
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod ray_sidedef_test;

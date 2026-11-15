@@ -2622,6 +2622,7 @@ dependencies = [
  "env_logger",
  "getrandom 0.4.2",
  "image",
+ "js-sys",
  "libc",
  "libc-wasm",
  "log",

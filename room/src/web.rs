@@ -259,7 +259,9 @@ fn schedule_frame() {
         return;
     };
     thread_local! {
+        static FRAME_PENDING: Cell<bool> = const { Cell::new(false) };
         static FRAME: Closure<dyn FnMut()> = Closure::new(|| {
+            FRAME_PENDING.with(|pending| pending.set(false));
             WINDOW.with_borrow(|w| {
                 if let Some(win) = w.as_ref() {
                     win.request_redraw();
@@ -267,8 +269,15 @@ fn schedule_frame() {
             });
         });
     }
+    // Input, resize, and GPU events can all reach about_to_wait before the
+    // next display frame. Coalesce them into one animation callback.
+    if FRAME_PENDING.with(|pending| pending.replace(true)) {
+        return;
+    }
     FRAME.with(|frame| {
-        let _ = window.request_animation_frame(frame.as_ref().unchecked_ref());
+        if window.request_animation_frame(frame.as_ref().unchecked_ref()).is_err() {
+            FRAME_PENDING.with(|pending| pending.set(false));
+        }
     });
 }
 

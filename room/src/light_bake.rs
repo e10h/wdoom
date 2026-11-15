@@ -47,7 +47,9 @@ pub fn write_bake(path: &Path, key: LightBakeKey, size: u32, texels: &[BakeTexel
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let mut file = std::fs::File::create(path)?;
+    // Keep the previous bake readable until the complete replacement is ready.
+    let pending = path.with_extension(format!("rmlt.pending-{}", std::process::id()));
+    let mut file = std::io::BufWriter::with_capacity(1024 * 1024, std::fs::File::create(&pending)?);
     file.write_all(MAGIC)?;
     file.write_all(&VERSION.to_le_bytes())?;
     file.write_all(&(key.episode as i32).to_le_bytes())?;
@@ -61,6 +63,10 @@ pub fn write_bake(path: &Path, key: LightBakeKey, size: u32, texels: &[BakeTexel
             file.write_all(&c.to_le_bytes())?;
         }
     }
+    file.flush()?;
+    file.get_ref().sync_all()?;
+    drop(file);
+    std::fs::rename(pending, path)?;
     Ok(())
 }
 
@@ -204,4 +210,26 @@ mod tests {
         assert_eq!(back[1].index, 15);
         assert_eq!(back[1].rgba, [9, 8, 7, 6]);
     }
+    #[test]
+    fn failed_replacement_preserves_previous_native_bake() {
+        let dir = std::env::temp_dir().join(format!("wdoom-atomic-bake-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("native.rmlt");
+        let key = LightBakeKey { episode: 1, map: 1, pack_hash: 42 };
+        let original = [BakeTexel { index: 0, rgba: [1, 2, 3, 4] }];
+        write_bake(&path, key, 1, &original).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        let pending = path.with_extension(format!("rmlt.pending-{}", std::process::id()));
+        // Force failure before publishing a replacement.
+        std::fs::create_dir(&pending).unwrap();
+        assert!(write_bake(&path, key, 1, &[]).is_err());
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        std::fs::remove_dir(&pending).unwrap();
+        let replacement = [BakeTexel { index: 0, rgba: [9, 8, 7, 6] }];
+        write_bake(&path, key, 1, &replacement).unwrap();
+        assert_eq!(read_bake(&path, key, 1).unwrap()[0].rgba, [9, 8, 7, 6]);
+        assert!(!pending.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
 }

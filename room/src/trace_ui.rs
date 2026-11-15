@@ -71,9 +71,10 @@ impl TraceUi {
         controls: &mut TraceSettings,
         traced: (u32, u32),
         samples: u32,
-    ) {
+    ) -> bool {
         let input = self.state.take_egui_input(&self.window);
         self.ctx.begin_pass(input);
+        let mut restart_bake = false;
         let shown = egui::Window::new("Path tracer")
             .default_pos(egui::pos2(12.0, 12.0))
             .resizable(false)
@@ -97,6 +98,8 @@ impl TraceUi {
                         .text("Min light"),
                 );
                 if controls.baking() {
+                    restart_bake = ui.button("Restart bake (keeps backup)").clicked();
+                    ui.small("Bake resumes saved samples until you restart it.");
                     ui.horizontal(|ui| {
                         ui.label("Accumulate in");
                         ui.selectable_value(&mut controls.world_space, true, "World");
@@ -186,5 +189,6 @@ impl TraceUi {
         for id in &output.textures_delta.free {
             self.renderer.free_texture(id);
         }
+        restart_bake
     }
 }

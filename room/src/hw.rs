@@ -32,7 +32,7 @@ use crate::doom::r_things::{hw_psprite_lump, hw_sprite_lump};
 use crate::doom::w_wad::{W_CacheLumpNum, W_LumpLength};
 use crate::doom::z_zone::PU_CACHE;
 use crate::voxel::{self, VoxelMesh};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
@@ -78,6 +78,8 @@ pub struct Vertex {
     pub atlas: [f32; 4],
     pub light: f32,
     pub tint: [f32; 3],
+    /// Surface tag: 0 ordinary, +1 sky, -1 directed wall. Paired walls
+    /// encode the other quad's first vertex as `-(vertex_index + 2)`.
     pub _pad: f32,
     /// Where this vertex lands in the light map. Negative skips storage.
     /// Each placed wall and floor gets its own rectangle so a repeated
@@ -783,11 +785,13 @@ unsafe fn push_world(
     }
     // One quad per solid surface. The partner seg of a two-sided line faces
     // the other way and would otherwise sit on the same plane.
+    let wall_start = verts.len();
     let mut drawn: HashSet<WallKey> = HashSet::new();
     for i in 0..numsegs {
         let seg = &*segs.add(i as usize);
         push_seg(verts, indices, atlas, seg, &mut drawn);
     }
+    reconcile_wall_sides(verts, wall_start);
     for i in 0..numsubsectors {
         let sub = &*subsectors.add(i as usize);
         let outline = flats.get(i as usize).map(Vec::as_slice).unwrap_or(&[]);
@@ -800,6 +804,25 @@ unsafe fn push_world(
             floor_light.get(i as usize).copied().flatten(),
             ceil_light.get(i as usize).copied().flatten(),
         );
+    }
+}
+
+/// Encode the other sidedef's quad without changing vertices, UVs, or packing.
+pub(crate) fn reconcile_wall_sides(verts: &mut [Vertex], start: usize) {
+    let mut pairs = BTreeMap::new();
+    for base in (start..verts.len()).step_by(4) {
+        let p = verts[base].pos;
+        let q = verts[base + 3].pos;
+        let a = [p[0].to_bits(), p[2].to_bits()];
+        let b = [q[0].to_bits(), q[2].to_bits()];
+        let (a, b) = if a < b { (a, b) } else { (b, a) };
+        let key = (a, b, p[1].to_bits(), verts[base + 1].pos[1].to_bits());
+        if let Some(other) = pairs.remove(&key) {
+            for vertex in &mut verts[base..base + 4] { vertex._pad = -(other as f32 + 2.0); }
+            for vertex in &mut verts[other..other + 4] { vertex._pad = -(base as f32 + 2.0); }
+        } else {
+            pairs.insert(key, base);
+        }
     }
 }
 
@@ -841,7 +864,7 @@ unsafe fn push_seg(
             z1
         } + fx(side.rowoffset);
         push_wall(
-            verts, indices, atlas, v1, v2, z0, z1, side, seg, tex, origin, light, drawn,
+            verts, indices, atlas, v1, v2, z0, z1, side, seg, 0, tex, origin, light, drawn,
         );
         return;
     }
@@ -858,7 +881,7 @@ unsafe fn push_seg(
             z0 + tex_pixels(tex)
         } + fx(side.rowoffset);
         push_wall(
-            verts, indices, atlas, v1, v2, z0, z1, side, seg, tex, origin, light, drawn,
+            verts, indices, atlas, v1, v2, z0, z1, side, seg, 1, tex, origin, light, drawn,
         );
     }
     if back.floorheight > front.floorheight {
@@ -871,7 +894,7 @@ unsafe fn push_seg(
             z1
         } + fx(side.rowoffset);
         push_wall(
-            verts, indices, atlas, v1, v2, z0, z1, side, seg, tex, origin, light, drawn,
+            verts, indices, atlas, v1, v2, z0, z1, side, seg, 2, tex, origin, light, drawn,
         );
     }
     if side.midtexture != 0 {
@@ -884,7 +907,7 @@ unsafe fn push_seg(
             fx(front.ceilingheight.min(back.ceilingheight))
         } + fx(side.rowoffset);
         push_wall(
-            verts, indices, atlas, v1, v2, z0, z1, side, seg, tex, origin, light, drawn,
+            verts, indices, atlas, v1, v2, z0, z1, side, seg, 0, tex, origin, light, drawn,
         );
     }
 }
@@ -935,6 +958,7 @@ unsafe fn push_wall(
     z1: f32,
     side: &side_t,
     seg: &seg_t,
+    band: u8,
     tex: i32,
     origin: f32,
     light: f32,
@@ -962,6 +986,9 @@ unsafe fn push_wall(
     let u0 = (fx(side.textureoffset) + fx(seg.offset)) / tw as f32;
     let u1 = u0 + len / tw as f32;
     let v_of = |z: f32| (origin - z) / th as f32;
+    // Texture animation and changing z extents do not change surface identity.
+    (*std::ptr::addr_of_mut!(LIGHTMAP)).wall_key = Some((seg as *const seg_t as usize, band));
+    let first_vertex = verts.len();
     push_quad(
         verts,
         indices,
@@ -978,6 +1005,12 @@ unsafe fn push_wall(
         true,
         MAX_SCENE_VERTS,
     );
+    (*std::ptr::addr_of_mut!(LIGHTMAP)).wall_key = None;
+    // Directed Doom wall faces use clockwise winding when seen from their
+    // sector. Keep both sidedefs in the mesh, but never display the far one.
+    for vertex in &mut verts[first_vertex..] {
+        vertex._pad = -1.0;
+    }
 }
 
 unsafe fn push_flat(
@@ -1547,6 +1580,9 @@ struct Lightmap {
     /// Record world sizes and ignore the stored packing.
     recording: bool,
     cursor: usize,
+    /// Stable directed seg and wall band -> original allocation index.
+    wall_slots: BTreeMap<(usize, u8), usize>,
+    wall_key: Option<(usize, u8)>,
     /// Texel scale chosen when the level was packed. Voxels use it too.
     scale: f32,
     /// Shelf cursor after the level geometry. Voxels allocate past it.
@@ -1562,6 +1598,8 @@ static mut LIGHTMAP: Lightmap = Lightmap {
     level_key: 0,
     recording: false,
     cursor: 0,
+    wall_slots: BTreeMap::new(),
+    wall_key: None,
     scale: 1.0,
     map_shelf: Shelf {
         x: 0,
@@ -1585,6 +1623,7 @@ fn light_begin() {
         if lm.level_key != key {
             lm.level_key = key;
             lm.placed.clear();
+            lm.wall_slots.clear();
             lm.pack_hash = 0;
             lm.scale = 1.0;
             lm.map_shelf = Shelf {
@@ -1596,6 +1635,7 @@ fn light_begin() {
         }
         lm.reqs.clear();
         lm.cursor = 0;
+        lm.wall_key = None;
         lm.recording = lm.placed.is_empty();
     }
 }
@@ -1847,8 +1887,22 @@ fn alloc_fit(w: i32, h: i32) -> Option<(i32, i32, i32, i32)> {
         let i = lm.cursor;
         lm.cursor += 1;
         if lm.recording {
+            if let Some(key) = lm.wall_key {
+                lm.wall_slots.insert(key, i);
+            }
             lm.reqs.push((w, h));
             Some((0, 0, w, h))
+        } else if let Some(key) = lm.wall_key {
+            if let Some(&slot) = lm.wall_slots.get(&key) {
+                return lm.placed.get(slot).copied().flatten();
+            }
+            // A door can expose a previously absent band. Allocate it after
+            // the original packing; never shift another wall's saved texels.
+            let rect = place_one(w, h, lm.scale, 512, world_light_limit(), &mut lm.map_shelf);
+            let slot = lm.placed.len();
+            lm.placed.push(rect);
+            lm.wall_slots.insert(key, slot);
+            rect
         } else {
             lm.placed.get(i).copied().flatten()
         }
