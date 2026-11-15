@@ -250,8 +250,10 @@ fn fs_hud(in: VertexOutput) -> @location(0) vec4<f32> {
 
 /// Path-traced level mesh. The sky and Brightmaps Plus masks are the lights,
 /// carried through six diffuse bounces. Sprites and the weapon stay rasterized.
-const RAY_SHADER: &str = r#"
+const RAY_SHADER: &str = concat!(r#"
 enable wgpu_ray_query;
+
+override LINEAR_OUTPUT: bool = false;
 
 struct FixtureLight {
     position_radius: vec4<f32>,
@@ -719,19 +721,32 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
             incoming = old.rgb;
         }
     }
-    // Display-only floor. Stored light stays honest; the picture just never
-    // goes fully black.
-    let ceiling = max(cam.fill.x, select(1.0, cam.fill.w, cam.fill.w > 0.0));
-    incoming = clamp(incoming, vec3<f32>(cam.fill.x), vec3<f32>(ceiling));
-    let shaded = primary.albedo * incoming;
-    let glow = primary.albedo * primary.emit * emit_scale;
-    // The photons above still leave at full strength. On this surface the
-    // glow is blended halfway with the texture, so the pattern stays visible.
-    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
-    let radiance = mix(shaded, hot, select(0.0, 0.5, primary.emit > 0.0));
+    if (LINEAR_OUTPUT) {
+        return FragOut(depth, vec4<f32>(incoming, 1.0));
+    }
+    let radiance = display_light(incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, emit_scale);
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
-"#;
+
+// Material/display pass after the screen HDR average (or the world-map read).
+// Binding 9 is the screen's averaged linear lighting in this bind group.
+@fragment
+fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
+    let vp = cam.viewport;
+    let ndc_x = ((frag.x - vp.x) / vp.z) * 2.0 - 1.0;
+    let ndc_y = 1.0 - ((frag.y - vp.y) / vp.w) * 2.0;
+    let dir = normalize(cam.right.xyz * ndc_x + cam.up.xyz * (ndc_y / max(cam.origin_aspect.w, 0.01)) + cam.forward.xyz);
+    let primary = trace(cam.origin_aspect.xyz, dir);
+    if (!primary.hit) { return FragOut(1.0, vec4<f32>(0.02, 0.02, 0.03, 1.0)); }
+    if (primary.alpha < 0.5) { discard; }
+    let clip = cam.view_proj * vec4<f32>(primary.pos, 1.0);
+    let depth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
+    if (primary.sky) { return FragOut(depth, vec4<f32>(primary.albedo, 1.0)); }
+    let incoming = textureLoad(light_read, vec2<i32>(frag.xy), 0).rgb;
+    let radiance = display_light(incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
+    return FragOut(depth, vec4<f32>(radiance, 1.0));
+}
+"#, include_str!("gpu/light_display.wgsl"));
 
 struct WorldGpu {
     atlas: wgpu::Texture,
@@ -846,6 +861,8 @@ struct RayImage {
     /// into history, so they do not smear across frames.
     _combined: wgpu::Texture,
     combined: wgpu::TextureView,
+    _display: wgpu::Texture,
+    display: wgpu::TextureView,
     _depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     bind: wgpu::BindGroup,
@@ -879,6 +896,8 @@ struct PlayImage {
 
 struct RayGpu {
     pipeline: wgpu::RenderPipeline,
+    present_pipeline: wgpu::RenderPipeline,
+    present_bind: Option<wgpu::BindGroup>,
     layout: wgpu::BindGroupLayout,
     uniform: wgpu::Buffer,
     bind_group: wgpu::BindGroup,
@@ -1306,7 +1325,7 @@ impl GpuState {
             cache: None,
         });
         let blit = create_blit(&device, surface_format);
-        let accum = create_accum(&device, surface_format);
+        let accum = create_accum(&device, if ray_query { wgpu::TextureFormat::Rgba16Float } else { surface_format });
         #[cfg(not(target_arch = "wasm32"))]
         let ui = crate::trace_ui::TraceUi::new(&device, surface_format, window);
         Ok(Self {
@@ -1531,6 +1550,7 @@ impl GpuState {
             && self.prepare_rays(scene, 0.0, 0.0, rw as f32, rh as f32, screen_weight);
         if trace {
             self.ensure_ray_image(rw, rh);
+            self.ensure_ray_present_bind();
         } else if doom_res {
             self.ensure_play_image(rw, rh);
         } else if let Some(world) = self.world.as_mut() {
@@ -1591,7 +1611,8 @@ impl GpuState {
                         pixels: rw * rh,
                         light_size: crate::hw::LIGHTMAP_SIZE,
                         slots: LIGHT_SLOTS,
-                        voxel_rows: crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32,
+                        voxel_rows: (crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32 & 0xffff)
+                            | (FRAME.load(std::sync::atomic::Ordering::Relaxed) << 16),
                     };
                     self.queue.write_buffer(
                         &world.light_bins.as_ref().expect("native light bins").uniform,
@@ -1730,12 +1751,31 @@ impl GpuState {
                 },
             );
             {
+                let image = self.ray_image.as_ref().expect("ray image");
+                let ray = self.world.as_ref().and_then(|w| w.ray.as_ref()).expect("rays");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("doom_ray_display"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &image.display, resolve_target: None, depth_slice: None,
+                        ops: wgpu::Operations { load: wgpu::LoadOp::Clear(wgpu::Color::BLACK), store: wgpu::StoreOp::Store },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &image.depth_view,
+                        depth_ops: Some(wgpu::Operations { load: wgpu::LoadOp::Load, store: wgpu::StoreOp::Store }), stencil_ops: None,
+                    }),
+                    occlusion_query_set: None, timestamp_writes: None, multiview_mask: None,
+                });
+                pass.set_pipeline(&ray.present_pipeline);
+                pass.set_bind_group(0, ray.present_bind.as_ref().expect("display bindings"), &[]);
+                pass.draw(0..6, 0..1);
+            }
+            {
             let image = self.ray_image.as_ref().expect("ray image");
             let world = self.world.as_ref().expect("world");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_ray_sprites"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &image.combined,
+                    view: &image.display,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -2218,13 +2258,15 @@ impl GpuState {
         {
             return;
         }
-        let format = self.config.format;
+        let format = wgpu::TextureFormat::Rgba16Float;
         let color = ray_target(&self.device, width, height, format, false);
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
         let history = ray_target(&self.device, width, height, format, true);
         let history_view = history.create_view(&wgpu::TextureViewDescriptor::default());
         let combined = ray_target(&self.device, width, height, format, true);
         let combined_view = combined.create_view(&wgpu::TextureViewDescriptor::default());
+        let display = ray_target(&self.device, width, height, self.config.format, false);
+        let display_view = display.create_view(&wgpu::TextureViewDescriptor::default());
         let (depth, depth_view) = depth_target(&self.device, width, height);
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("doom_ray_blit_group"),
@@ -2232,7 +2274,7 @@ impl GpuState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&combined_view),
+                    resource: wgpu::BindingResource::TextureView(&display_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2258,6 +2300,9 @@ impl GpuState {
                 },
             ],
         });
+        if let Some(ray) = self.world.as_mut().and_then(|w| w.ray.as_mut()) {
+            ray.present_bind = None;
+        }
         self.accum_count = 0;
         self.accum_key = None;
         self.ray_image = Some(RayImage {
@@ -2266,12 +2311,25 @@ impl GpuState {
             _history: history,
             _combined: combined,
             combined: combined_view,
+            _display: display,
+            display: display_view,
             _depth: depth,
             depth_view,
             bind,
             accum_bind,
             size: (width, height),
         });
+    }
+
+    fn ensure_ray_present_bind(&mut self) {
+        let Some(image) = self.ray_image.as_ref() else { return; };
+        let Some(world) = self.world.as_mut() else { return; };
+        let Some(ray) = world.ray.as_mut() else { return; };
+        if ray.present_bind.is_none() {
+            ray.present_bind = Some(ray_bind_group(&self.device, &ray.layout, &ray.uniform,
+                &world.atlas, &world.emission, &image._combined, &world.light_write,
+                &world.vertices, &world.indices, &world.light_hits, &ray.tlas));
+        }
     }
 
     /// `true` when this frame continues the running average. A camera or
@@ -2443,7 +2501,10 @@ impl GpuState {
                 crate::hw::VOXEL_LIGHT_ROWS.max(0) as f32,
                 self.trace.max_light,
             ],
-            fixtures: unsafe { crate::fixture_lights::collect_for_scene(scene) },
+            // Keep the original texture-emission path for ceilings. Dedicated
+            // sources are only for standing lamps/torches; their records leave
+            // the panel-coverage flag off, so ceiling emission is not suppressed.
+            fixtures: unsafe { crate::fixture_lights::collect() },
         };
         queue.write_buffer(&ray.uniform, 0, bytemuck::bytes_of(&uniform));
         true
@@ -3383,10 +3444,12 @@ fn sync_ray(
     }
 
     let kept = world.ray.take();
-    let (layout, pipeline, uniform) = if let Some(ray) = kept {
-        (ray.layout, ray.pipeline, ray.uniform)
+    let (layout, pipeline, present_pipeline, uniform) = if let Some(ray) = kept {
+        (ray.layout, ray.pipeline, ray.present_pipeline, ray.uniform)
     } else {
-        create_ray_pipeline(device, format)?
+        let (layout, pipeline, uniform) = create_ray_pipeline_mode(device, wgpu::TextureFormat::Rgba16Float, true)?;
+        let present = create_ray_present_pipeline(device, &layout, format)?;
+        (layout, pipeline, present, uniform)
     };
     let blas = make_blas(device, max_verts, max_indices);
     let tlas = device.create_tlas(&wgpu::CreateTlasDescriptor {
@@ -3410,6 +3473,8 @@ fn sync_ray(
     );
     world.ray = Some(RayGpu {
         pipeline,
+        present_pipeline,
+        present_bind: None,
         layout,
         uniform,
         bind_group,
@@ -3424,6 +3489,11 @@ fn create_ray_pipeline(
     device: &wgpu::Device,
     format: wgpu::TextureFormat,
 ) -> Result<(wgpu::BindGroupLayout, wgpu::RenderPipeline, wgpu::Buffer), String> {
+    create_ray_pipeline_mode(device, format, false)
+}
+
+fn create_ray_pipeline_mode(device: &wgpu::Device, format: wgpu::TextureFormat, linear: bool)
+    -> Result<(wgpu::BindGroupLayout, wgpu::RenderPipeline, wgpu::Buffer), String> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("doom_ray_shader"),
@@ -3544,7 +3614,10 @@ fn create_ray_pipeline(
                 blend: Some(wgpu::BlendState::REPLACE),
                 write_mask: wgpu::ColorWrites::ALL,
             })],
-            compilation_options: Default::default(),
+            compilation_options: wgpu::PipelineCompilationOptions {
+                constants: &[("LINEAR_OUTPUT", if linear { 1.0 } else { 0.0 })],
+                ..Default::default()
+            },
         }),
         primitive: wgpu::PrimitiveState {
             topology: wgpu::PrimitiveTopology::TriangleList,
@@ -3561,6 +3634,27 @@ fn create_ray_pipeline(
         return Err(err.to_string());
     }
     Ok((layout, pipeline, uniform))
+}
+
+fn create_ray_present_pipeline(device: &wgpu::Device, layout: &wgpu::BindGroupLayout,
+    format: wgpu::TextureFormat) -> Result<wgpu::RenderPipeline, String> {
+    let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
+    let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("doom_ray_present_shader"), source: wgpu::ShaderSource::Wgsl(RAY_SHADER.into()),
+    });
+    let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("doom_ray_present_layout"), bind_group_layouts: &[Some(layout)], immediate_size: 0,
+    });
+    let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("doom_ray_present_pipeline"), layout: Some(&pipeline_layout),
+        vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_ray"), buffers: &[], compilation_options: Default::default() },
+        fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_present"),
+            targets: &[Some(wgpu::ColorTargetState { format, blend: Some(wgpu::BlendState::REPLACE), write_mask: wgpu::ColorWrites::ALL })], compilation_options: Default::default() }),
+        primitive: Default::default(), depth_stencil: Some(depth_state(false, wgpu::CompareFunction::Always)),
+        multisample: Default::default(), multiview_mask: None, cache: None,
+    });
+    if let Some(error) = pollster::block_on(scope.pop()) { return Err(error.to_string()); }
+    Ok(pipeline)
 }
 
 fn storage_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -3702,9 +3796,15 @@ fn cs_bin(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let mask = params.slots - 1u;
     var slot = hash_texel(hit.packed) & mask;
-    let add_r = u32(clamp(hit.r, 0.0, 65535.0) * 64.0);
-    let add_g = u32(clamp(hit.g, 0.0, 65535.0) * 64.0);
-    let add_b = u32(clamp(hit.b, 0.0, 65535.0) * 64.0);
+    // Stochastic rounding keeps sub-1/64 bounce energy instead of always
+    // truncating it to black. The high 16 row bits carry a fresh frame seed.
+    let seed = hash_texel(i ^ hit.packed ^ (params.voxel_rows >> 16u) * 0x9e3779b9u);
+    let jitter_r = f32(hash_texel(seed ^ 0x1234567u) & 0xffffffu) / 16777216.0;
+    let jitter_g = f32(hash_texel(seed ^ 0x7654321u) & 0xffffffu) / 16777216.0;
+    let jitter_b = f32(hash_texel(seed ^ 0xabcdefu) & 0xffffffu) / 16777216.0;
+    let add_r = u32(clamp(hit.r, 0.0, 65535.0) * 64.0 + jitter_r);
+    let add_g = u32(clamp(hit.g, 0.0, 65535.0) * 64.0 + jitter_g);
+    let add_b = u32(clamp(hit.b, 0.0, 65535.0) * 64.0 + jitter_b);
     for (var probe = 0u; probe < 128u; probe = probe + 1u) {
         let at = slot * 5u;
         let found = atomicCompareExchangeWeak(&bins[at], 0u, hit.packed);
@@ -3746,8 +3846,9 @@ fn cs_save(@builtin(global_invocation_id) id: vec3<u32>) {
     let old = textureLoad(light_read, coord, 0);
     // Every look at this texel adds one sample, whether the camera moved or not.
     // Walking the room keeps filling surfaces in.
-    let voxel_y0 = i32(params.light_size) - i32(params.voxel_rows);
-    let moving = params.voxel_rows > 0u && coord.y >= voxel_y0;
+    let voxel_rows = params.voxel_rows & 0xffffu;
+    let voxel_y0 = i32(params.light_size) - i32(voxel_rows);
+    let moving = voxel_rows > 0u && coord.y >= voxel_y0;
     // Actors move through light. Cap history so their patch keeps following
     // the room instead of locking the first noisy looks forever.
     let cap = select(1024.0, 24.0, moving);
@@ -3776,6 +3877,11 @@ fn create_light_bins(
     light_write: &wgpu::Texture,
     hits: &wgpu::Buffer,
 ) -> Result<LightBins, String> {
+    create_light_bins_sized(device, light, light_write, hits, LIGHT_SLOTS)
+}
+
+fn create_light_bins_sized(device: &wgpu::Device, light: &wgpu::Texture,
+    light_write: &wgpu::Texture, hits: &wgpu::Buffer, slots: u32) -> Result<LightBins, String> {
     let scope = device.push_error_scope(wgpu::ErrorFilter::Validation);
     let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("doom_light_bin_shader"),
@@ -3838,7 +3944,7 @@ fn create_light_bins(
     });
     let bins = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doom_light_bins"),
-        size: u64::from(LIGHT_SLOTS) * 5 * 4,
+        size: u64::from(slots) * 5 * 4,
         usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -4995,3 +5101,6 @@ mod msaa_test;
 
 mod msaa;
 use msaa::{msaa_color_target, world_msaa_pipeline};
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod linear_accum_test;
