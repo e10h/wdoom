@@ -1,0 +1,4 @@
+# Release bundles are generated runtime assets, not maintained source.
+web-dist/
+web/pkg/
+out/
