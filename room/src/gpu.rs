@@ -824,7 +824,7 @@ impl Default for TraceSettings {
             height: 720,
             world_space: true,
             flashlight: 0.0,
-            min_light: 0.4,
+            min_light: 0.23,
             max_light: 2.0,
             doom_res: false,
             msaa: true,
