@@ -21,9 +21,8 @@ use crate::doom::p_setup::{
 use crate::doom::p_telept::mobj_t;
 use crate::doom::p_tick::leveltime;
 use crate::doom::r_data::{
-    firstflat, firstspritelump, flattranslation, hw_texture_size, numflats, numspritelumps,
+    firstflat, firstspritelump, flattranslation, hw_texture_pixels, hw_texture_size, numflats, numspritelumps,
     numtextures, spriteoffset, spritetopoffset, spritewidth, textureheight, texturetranslation,
-    R_GetColumn,
 };
 use crate::doom::r_draw::{viewheight, viewwidth, viewwindowx, viewwindowy};
 use crate::doom::r_main::{viewangle, viewx, viewy, viewz};
@@ -539,15 +538,15 @@ unsafe fn blit_wall(
     h: i32,
     pal: &[(u8, u8, u8); 256],
 ) {
-    for col in 0..w {
-        let src = R_GetColumn(tex, col);
-        if src.is_null() {
-            continue;
-        }
-        for row in 0..h {
-            let idx = *src.add(row as usize) as usize;
-            let (r, g, b) = pal[idx.min(255)];
-            pack.put(x + col, y + row, [r, g, b, 255]);
+    let Some((width, height, pixels)) = hw_texture_pixels(tex) else {
+        return;
+    };
+    for row in 0..h.min(height) {
+        for col in 0..w.min(width) {
+            if let Some(index) = pixels[(row * width + col) as usize] {
+                let (r, g, b) = pal[index as usize];
+                pack.put(x + col, y + row, [r, g, b, 255]);
+            }
         }
     }
 }

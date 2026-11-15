@@ -674,6 +674,96 @@ pub unsafe fn hw_texture_size(tex: c_int) -> (i32, i32) {
     (w.max(0), h.max(0))
 }
 
+/// Compose a hardware wall image from patch posts rather than the software
+/// column fast path, which may point at only the first run in a patch column.
+/// Unposted pixels remain transparent; posted palette index zero is opaque.
+///
+/// # Safety
+/// Texture/WAD tables must be initialized and accessed on the engine thread.
+pub unsafe fn hw_texture_pixels(tex: c_int) -> Option<(i32, i32, Vec<Option<u8>>)> {
+    let (width, height) = hw_texture_size(tex);
+    if width <= 0 || height <= 0 || textures.is_null() {
+        return None;
+    }
+    let texture = *textures.add(tex as usize);
+    if texture.is_null() {
+        return None;
+    }
+    let mut pixels = vec![None; width as usize * height as usize];
+    let patches = std::ptr::addr_of!((*texture).patches) as *const texpatch_t;
+    for index in 0..(*texture).patchcount.max(0) as usize {
+        let patch = &*patches.add(index);
+        let length = W_LumpLength(patch.patch as u32);
+        if length < 8 {
+            continue;
+        }
+        let data = W_CacheLumpNum(patch.patch, PU_CACHE) as *const u8;
+        if data.is_null() {
+            continue;
+        }
+        composite_hw_patch(
+            &mut pixels,
+            width as usize,
+            height as usize,
+            std::slice::from_raw_parts(data, length as usize),
+            patch.originx as i32,
+            patch.originy as i32,
+        );
+    }
+    Some((width, height, pixels))
+}
+
+fn composite_hw_patch(
+    pixels: &mut [Option<u8>],
+    width: usize,
+    height: usize,
+    patch: &[u8],
+    origin_x: i32,
+    origin_y: i32,
+) {
+    if patch.len() < 8 {
+        return;
+    }
+    let columns = u16::from_le_bytes([patch[0], patch[1]]) as usize;
+    if patch.len() < 8 + columns * 4 {
+        return;
+    }
+    for column in 0..columns {
+        let x = origin_x + column as i32;
+        if x < 0 || x >= width as i32 {
+            continue;
+        }
+        let offset = 8 + column * 4;
+        let mut post = u32::from_le_bytes(patch[offset..offset + 4].try_into().unwrap()) as usize;
+        let mut previous_top = -1i32;
+        while let Some(&top) = patch.get(post) {
+            if top == 255 {
+                break;
+            }
+            let Some(&count) = patch.get(post + 1) else {
+                break;
+            };
+            let start = post + 3;
+            let Some(run) = patch.get(start..start + count as usize) else {
+                break;
+            };
+            let mut top = top as i32;
+            // Tall-patch convention: a non-increasing delta is relative.
+            if top <= previous_top {
+                top += previous_top;
+            }
+            previous_top = top;
+            for (row, &pixel) in run.iter().enumerate() {
+                let y = origin_y + top + row as i32;
+                if y >= 0 && y < height as i32 {
+                    pixels[y as usize * width + x as usize] = Some(pixel);
+                }
+            }
+            post = start + count as usize + 1;
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // R_GetColumn
 // ---------------------------------------------------------------------------
@@ -1342,4 +1432,46 @@ pub unsafe extern "C" fn R_Data_Link_Anchor() {
     let _ = R_CheckTextureNumForName as *const () as usize;
     let _ = R_TextureNumForName as *const () as usize;
     let _ = R_PrecacheLevel as *const () as usize;
+}
+
+#[cfg(test)]
+mod hw_patch_tests {
+    use super::composite_hw_patch;
+
+    fn patch() -> Vec<u8> {
+        let mut bytes = vec![2, 0, 8, 0, 0, 0, 0, 0, 16, 0, 0, 0, 28, 0, 0, 0];
+        // Column zero has two runs and transparent gaps. Palette zero is posted.
+        bytes.extend([1, 2, 0, 0, 10, 0, 5, 1, 0, 11, 0, 255]);
+        bytes.extend([0, 8, 0, 20, 21, 22, 23, 24, 25, 26, 27, 0, 255]);
+        bytes
+    }
+
+    #[test]
+    fn multiple_posts_preserve_gaps_and_opaque_palette_zero() {
+        let mut pixels = vec![None; 16];
+        composite_hw_patch(&mut pixels, 2, 8, &patch(), 0, 0);
+        assert_eq!((0..8).map(|y| pixels[y * 2]).collect::<Vec<_>>(),
+            vec![None, Some(0), Some(10), None, None, Some(11), None, None]);
+        assert_eq!((0..8).map(|y| pixels[y * 2 + 1]).collect::<Vec<_>>(),
+            (20..28).map(Some).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn patch_origins_clip_without_replacing_unposted_pixels() {
+        let mut pixels = vec![Some(99); 24];
+        composite_hw_patch(&mut pixels, 4, 6, &patch(), -1, -2);
+        for y in 0..6 {
+            assert_eq!(pixels[y * 4], Some(22 + y as u8));
+            assert_eq!(&pixels[y * 4 + 1..y * 4 + 4], &[Some(99); 3]);
+        }
+    }
+
+    #[test]
+    fn truncated_posts_do_not_read_outside_the_patch() {
+        let mut pixels = vec![None; 16];
+        let mut truncated = patch();
+        truncated.truncate(19);
+        composite_hw_patch(&mut pixels, 2, 8, &truncated, 0, 0);
+        assert!(pixels.iter().all(Option::is_none));
+    }
 }
