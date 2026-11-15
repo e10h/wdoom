@@ -94,9 +94,14 @@ impl TraceUi {
                     "Walk the empty map to fill light. Enemies are frozen and cannot hurt you."
                 });
                 ui.add(
-                    egui::Slider::new(&mut controls.min_light, 0.0..=0.4)
+                    egui::Slider::new(&mut controls.min_light, 0.0..=1.0)
                         .text("Min light"),
                 );
+                ui.add(
+                    egui::Slider::new(&mut controls.max_light, 0.4..=2.0)
+                        .text("Max light"),
+                );
+                controls.max_light = controls.max_light.max(controls.min_light);
                 if controls.baking() {
                     restart_bake = ui.button("Restart bake (keeps backup)").clicked();
                     ui.small("Bake resumes saved samples until you restart it.");

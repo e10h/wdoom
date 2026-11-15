@@ -106,7 +106,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const WORLD_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
-    // x: minimum incoming light; y: emission strength for surface glow.
+    // x: minimum incoming light; y: emission strength; z: display ceiling.
     fill: vec4<f32>,
 };
 
@@ -182,7 +182,8 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
             incoming = baked.rgb;
         }
     }
-    incoming = max(incoming, vec3<f32>(camera.fill.x));
+    let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
+    incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
     let albedo = color.rgb * in.tint;
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
@@ -647,7 +648,8 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
     }
     // Display-only floor. Stored light stays honest; the picture just never
     // goes fully black.
-    incoming = max(incoming, vec3<f32>(cam.fill.x));
+    let ceiling = max(cam.fill.x, select(1.0, cam.fill.w, cam.fill.w > 0.0));
+    incoming = clamp(incoming, vec3<f32>(cam.fill.x), vec3<f32>(ceiling));
     let shaded = primary.albedo * incoming;
     let glow = primary.albedo * primary.emit * emit_scale;
     // The photons above still leave at full strength. On this surface the
@@ -711,6 +713,8 @@ pub(crate) struct TraceSettings {
     pub(crate) flashlight: f32,
     /// Floor under incoming light when drawing, so pitch-black rooms stay visible.
     pub(crate) min_light: f32,
+    /// Display-only ceiling; HDR bake samples retain their original values.
+    pub(crate) max_light: f32,
     /// Play mode renders at the classic Doom view size and nearest-upsamples.
     pub(crate) doom_res: bool,
 }
@@ -726,6 +730,7 @@ impl Default for TraceSettings {
             world_space: true,
             flashlight: 0.0,
             min_light: 0.4,
+            max_light: 2.0,
             doom_res: false,
         }
     }
@@ -1413,7 +1418,7 @@ impl GpuState {
             upload_mesh(world, &self.device, &self.queue, scene);
             let cam = WorldUniform {
                 view_proj: scene.view_proj,
-                fill: [self.trace.min_light, self.trace.emission, 0.0, 0.0],
+                fill: [self.trace.min_light, self.trace.emission, self.trace.max_light, 0.0],
             };
             self.queue
                 .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
@@ -2231,6 +2236,7 @@ impl GpuState {
                 accum_count,
                 ..
             } = self;
+            let previous_max_light = trace.max_light;
             let restart_bake = ui.paint(
                 device,
                 queue,
@@ -2242,7 +2248,12 @@ impl GpuState {
                 *traced,
                 *accum_count,
             );
+            let ceiling_changed = previous_max_light != trace.max_light;
             crate::platform::maintain_pointer_capture();
+            if ceiling_changed {
+                self.accum_key = None;
+                self.accum_count = 0;
+            }
             if restart_bake {
                 self.restart_light_bake();
             }
@@ -2340,7 +2351,7 @@ impl GpuState {
                 self.trace.min_light,
                 if self.trace.playing() { 1.0 } else { 0.0 },
                 crate::hw::VOXEL_LIGHT_ROWS.max(0) as f32,
-                0.0,
+                self.trace.max_light,
             ],
         };
         queue.write_buffer(&ray.uniform, 0, bytemuck::bytes_of(&uniform));

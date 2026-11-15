@@ -71,7 +71,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: tex.format(),
+            format: wgpu::TextureFormat::Rgba16Float,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -154,13 +154,18 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                 },
                 emission.size(),
             );
-            for sample in [[255, 255, 255, 255], [0, 0, 0, 0], [0, 0, 0, 255]] {
+            for sample in [
+                [0x3c00u16, 0x3c00, 0x3c00, 0x3c00],
+                [0, 0, 0, 0],
+                [0, 0, 0, 0x3c00],
+                [0x4c00, 0x4c00, 0x4c00, 0x3c00], // HDR 16 must display like capped 1
+            ] {
                 queue.write_texture(
                     light.as_image_copy(),
-                    &sample,
+                    bytemuck::cast_slice(&sample),
                     wgpu::TexelCopyBufferLayout {
                         offset: 0,
-                        bytes_per_row: Some(4),
+                        bytes_per_row: Some(8),
                         rows_per_image: Some(1),
                     },
                     light.size(),
@@ -189,7 +194,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                         if opposite_view { 2.0 * distance } else { 0.0 },
                                     ],
                                 ],
-                                fill: [0.0, 40.0, 0.0, 0.0],
+                                fill: [0.0, 40.0, 1.0, 0.0],
                             };
                             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&camera));
                             let mut vertices = Vec::new();
@@ -290,7 +295,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                             let px = read.slice(..).get_mapped_range()[..4].to_vec();
                             read.unmap();
                             let expected = if glow != 0 {
-                                if sample == [0, 0, 0, 255] {
+                                if sample == [0, 0, 0, 0x3c00] {
                                     if opposite_view {
                                         [124, 0, 0, 255]
                                     } else {
@@ -301,7 +306,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                 } else {
                                     [188, 188, 188, 255]
                                 }
-                            } else if sample == [0, 0, 0, 255] {
+                            } else if sample == [0, 0, 0, 0x3c00] {
                                 [0, 0, 0, 255]
                             } else if opposite_view {
                                 [255, 0, 0, 255]
