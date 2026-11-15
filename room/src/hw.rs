@@ -677,6 +677,16 @@ unsafe fn raster_patch(lump: i32, pal: &[(u8, u8, u8); 256]) -> Option<(i32, i32
     Some((w, h, px))
 }
 
+/// Doom's 90-degree horizontal view projects the 320-wide image with a
+/// 160-pixel focal length. Clamp vertically: SKY textures are panoramas,
+/// not full-sphere images, and must not tile over the poles or below ground.
+fn sky_texture_v(elevation: f32, texture_height: i32) -> f32 {
+    let height = texture_height.max(1) as f32;
+    let elevation = elevation.clamp(-1.5707, 1.5707);
+    let row = 100.0 - (SCREENWIDTH as f32 * 0.5) * elevation.tan();
+    row.clamp(0.5, height - 0.5) / height
+}
+
 unsafe fn push_sky(
     verts: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
@@ -694,14 +704,15 @@ unsafe fn push_sky(
         return;
     }
     // A sphere around the eye, so looking straight up or down still hits sky.
-    // Row 100 sits on the horizon (`skytexturemid`). The top of the texture
-    // meets the pole. A full turn maps to 1024 sky columns.
+    // Row 100 sits on the horizon (`skytexturemid`). Vertical projection
+    // matches Doom's 160-pixel focal length, rather than stretching 100 rows
+    // across the entire upper hemisphere. A turn maps to 1024 sky columns.
     let radius = 6000.0;
     let repeats = 1024.0 / tw as f32;
     let sky_start = verts.len();
     let segs_n = 48i32;
     let lats = 16i32;
-    let v_of = |el: f32| (100.0 - el.to_degrees() * (100.0 / 90.0)) / th as f32;
+    let v_of = |el: f32| sky_texture_v(el, th);
     for lat in 0..lats {
         let el0 =
             -std::f32::consts::FRAC_PI_2 + (lat as f32) / (lats as f32) * std::f32::consts::PI;
@@ -2158,6 +2169,26 @@ mod tests {
         pack_group, place_one, seg_faces_view, voxel_light_shelf, world_light_limit, Shelf,
         LIGHTMAP_SIZE,
     };
+
+    #[test]
+    fn sky_vertical_scale_matches_doom_instead_of_stretching_to_the_pole() {
+        use super::sky_texture_v;
+        assert!((sky_texture_v(0.0, 128) * 128.0 - 100.0).abs() < 0.001);
+        // A ray half a focal length above center sees row 20, not row 70.
+        let elevation = 0.5f32.atan();
+        assert!((sky_texture_v(elevation, 128) * 128.0 - 20.0).abs() < 0.001);
+        assert_eq!(sky_texture_v(std::f32::consts::FRAC_PI_2, 128), 0.5 / 128.0);
+        assert_eq!(sky_texture_v(-std::f32::consts::FRAC_PI_2, 128), 127.5 / 128.0);
+        for height in [128, 200, 256] {
+            let mut previous = 1.0;
+            for degree in -90..=90 {
+                let v = sky_texture_v((degree as f32).to_radians(), height);
+                assert!((0.0..1.0).contains(&v));
+                assert!(v <= previous, "vertical coordinates must never wrap");
+                previous = v;
+            }
+        }
+    }
 
     #[test]
     fn wall_is_drawn_from_the_front_only() {
