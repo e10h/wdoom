@@ -253,6 +253,18 @@ fn fs_hud(in: VertexOutput) -> @location(0) vec4<f32> {
 const RAY_SHADER: &str = r#"
 enable wgpu_ray_query;
 
+struct FixtureLight {
+    position_radius: vec4<f32>,
+    color_power: vec4<f32>,
+    triangle_c: vec4<f32>,
+    atlas: vec4<f32>,
+    uv_ab: vec4<f32>,
+    uv_c: vec4<f32>,
+};
+struct FixtureSources {
+    counts: vec4<u32>,
+    lights: array<FixtureLight, 128>,
+};
 struct RayCam {
     view_proj: mat4x4<f32>,
     origin_aspect: vec4<f32>,
@@ -266,6 +278,7 @@ struct RayCam {
     // x: minimum incoming light so dark rooms stay readable.
     // y: 1 = play mode (sample light map only). z: rows reserved under the level.
     fill: vec4<f32>,
+    fixtures: FixtureSources,
 };
 
 struct VertexOutput {
@@ -284,6 +297,7 @@ struct Surf {
     light: f32,
     emit: f32,
     sky: bool,
+    sampled_emitter: bool,
     alpha: f32,
     hit: bool,
     // Albedo atlas coordinate. `light_uv` is this surface's own light texel,
@@ -396,6 +410,7 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     surf.light = 0.0;
     surf.emit = 0.0;
     surf.sky = false;
+    surf.sampled_emitter = false;
     surf.alpha = 0.0;
     surf.hit = false;
     surf.atlas_uv = vec2<f32>(0.0);
@@ -459,6 +474,7 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     surf.light = bary_mix(i0, i1, i2, 9u, b);
     surf.emit = textureSampleLevel(emit_tex, emit_samp, atlas_uv, 0.0).r;
     surf.sky = bary_mix(i0, i1, i2, 13u, b) > 0.5;
+    surf.sampled_emitter = attr(i0, 13u) == -0.25 && cam.fixtures.counts.y != 0u;
     surf.alpha = tex.a;
     surf.hit = true;
     surf.atlas_uv = atlas_uv;
@@ -497,6 +513,53 @@ fn flashlight(pos: vec3<f32>, n: vec3<f32>, check_shadow: bool) -> vec3<f32> {
     }
     let falloff = 1.0 / (1.0 + dist2 * 0.00002);
     return vec3<f32>(1.0, 0.96, 0.88) * amount * ndl * cone * falloff;
+}
+
+// Sample one dedicated source: work is independent of the fixture count.
+// Intensity is inverse-square, radius softens both shadows and near-field light.
+fn fixture_light(pos: vec3<f32>, n: vec3<f32>, rng: ptr<function, u32>, first: u32, count: u32) -> vec3<f32> {
+    if (count == 0u) { return vec3<f32>(0.0); }
+    let index = first + min(u32(rand(rng) * f32(count)), count - 1u);
+    let source = cam.fixtures.lights[index];
+    var light_pos: vec3<f32>;
+    var radiance = source.color_power.rgb * source.color_power.w * (cam.light.x / 40.0);
+    let area_source = source.position_radius.w < 0.0;
+    if (area_source) {
+        let q = sqrt(rand(rng));
+        let t = rand(rng);
+        let bary = vec3<f32>(1.0 - q, q * (1.0 - t), q * t);
+        light_pos = source.position_radius.xyz * bary.x + source.color_power.xyz * bary.y + source.triangle_c.xyz * bary.z;
+        let uv = source.uv_ab.xy * bary.x + source.uv_ab.zw * bary.y + source.uv_c.xy * bary.z;
+        let tile = fract(uv);
+        let atlas_uv = mix(source.atlas.xy, source.atlas.zw, tile);
+        let emission = textureSampleLevel(emit_tex, emit_samp, atlas_uv, 0.0).r;
+        if (emission <= 0.0) { return vec3<f32>(0.0); }
+        let color = textureSampleLevel(atlas_tex, atlas_samp, atlas_uv, 0.0).rgb;
+        radiance = color * emission * cam.light.x * source.color_power.w / 3.14159265;
+        // Ceilings emit into the room. Start just below the original plane.
+        light_pos.y -= RAY_BIAS;
+    } else {
+        let z = rand(rng) * 2.0 - 1.0;
+        let phi = rand(rng) * 6.2831853;
+        let r = sqrt(max(0.0, 1.0 - z * z));
+        let offset = vec3<f32>(r * cos(phi), z, r * sin(phi)) * source.position_radius.w;
+        light_pos = source.position_radius.xyz + offset;
+    }
+    let delta = light_pos - pos;
+    let dist2 = dot(delta, delta);
+    if (dist2 < 0.01) { return vec3<f32>(0.0); }
+    let dist = sqrt(dist2);
+    let direction = delta / dist;
+    let ndl = max(dot(n, direction), 0.0);
+    if (ndl <= 0.0) { return vec3<f32>(0.0); }
+    let blocker = trace(pos + n * RAY_BIAS, direction);
+    if (blocker.hit && !blocker.sky && distance(blocker.pos, pos) < dist - 2.0 * RAY_BIAS) {
+        return vec3<f32>(0.0);
+    }
+    let radius2 = source.position_radius.w * source.position_radius.w;
+    let emitter_cos = select(1.0, max(direction.y, 0.0), area_source);
+    let denominator = select(max(dist2, radius2), dist2, area_source);
+    return radiance * (ndl * emitter_cos * f32(count) / denominator);
 }
 
 // One shadow ray. The sky sphere is the only thing that counts as the sun.
@@ -591,8 +654,18 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                 // The surface we see keeps its own texel. Later hits contribute
                 // their color into the light arriving here.
                 let shade = select(vec3<f32>(1.0), surf.albedo, bounce > 0);
-                if (bounce > 0 && surf.emit > 0.0) {
+                if (bounce > 0 && surf.emit > 0.0 && !surf.sampled_emitter) {
                     incoming += throughput * surf.albedo * surf.emit * emit_scale;
+                }
+                // Only one of the four paths samples fixtures. Compensate its
+                // probability to retain energy. Bulbs and ceilings each get
+                // one sample so large ceilings cannot starve small fixtures.
+                // At most two shadow rays per bounce, never one per lamp.
+                if (s == 0u) {
+                    let points = cam.fixtures.counts.z;
+                    let bulbs = fixture_light(surf.pos, surf.n, &rng, 0u, points);
+                    let panels = fixture_light(surf.pos, surf.n, &rng, points, cam.fixtures.counts.x - points);
+                    incoming += throughput * shade * (bulbs + panels) * f32(SAMPLES);
                 }
                 let ndl = sun_ndotl(surf.pos, surf.n);
                 if (ndl > 0.0) {
@@ -675,6 +748,11 @@ struct WorldGpu {
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     weapon_pipeline: wgpu::RenderPipeline,
+    pipeline_msaa: wgpu::RenderPipeline,
+    weapon_pipeline_msaa: wgpu::RenderPipeline,
+    _msaa_color: wgpu::Texture,
+    msaa_view: wgpu::TextureView,
+    depth_samples: u32,
     depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
     depth_size: (u32, u32),
@@ -717,6 +795,8 @@ pub(crate) struct TraceSettings {
     pub(crate) max_light: f32,
     /// Play mode renders at the classic Doom view size and nearest-upsamples.
     pub(crate) doom_res: bool,
+    /// Smooth silhouettes during full-resolution raster Play.
+    pub(crate) msaa: bool,
 }
 
 impl Default for TraceSettings {
@@ -732,6 +812,7 @@ impl Default for TraceSettings {
             min_light: 0.4,
             max_light: 2.0,
             doom_res: false,
+            msaa: true,
         }
     }
 }
@@ -1426,6 +1507,7 @@ impl GpuState {
         // Play is plain raster × light map. Only bake builds rays / BLAS.
         let baking = self.trace.baking();
         let doom_res = self.trace.playing() && self.trace.doom_res;
+        let msaa = self.trace.playing() && self.trace.msaa && !doom_res;
         let (rw, rh) = if baking {
             ray_extent(vw, vh, self.trace.height)
         } else if doom_res {
@@ -1452,11 +1534,19 @@ impl GpuState {
         } else if doom_res {
             self.ensure_play_image(rw, rh);
         } else if let Some(world) = self.world.as_mut() {
-            if self.config.width != world.depth_size.0 || self.config.height != world.depth_size.1 {
-                let (depth, depth_view) =
-                    depth_target(&self.device, self.config.width, self.config.height);
+            let samples = if msaa { 4 } else { 1 };
+            let resized = world.depth_size != (self.config.width, self.config.height);
+            if resized || world.depth_samples != samples {
+                let (w, h) = if msaa { (self.config.width, self.config.height) } else { (1, 1) };
+                let (color, view) = msaa_color_target(&self.device, w, h, self.config.format);
+                world._msaa_color = color;
+                world.msaa_view = view;
+            }
+            if resized || world.depth_samples != samples {
+                let (depth, depth_view) = depth_target_samples(&self.device, self.config.width, self.config.height, samples);
                 world.depth = depth;
                 world.depth_view = depth_view;
+                world.depth_samples = samples;
                 world.depth_size = (self.config.width, self.config.height);
             }
         }
@@ -1566,7 +1656,7 @@ impl GpuState {
                 multiview_mask: None,
             });
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
-            draw_scene(&mut pass, world, scene, true);
+            draw_scene(&mut pass, world, scene, true, false);
             }
             if store_light {
                 if let Some(world) = self.world.as_ref() {
@@ -1723,7 +1813,7 @@ impl GpuState {
                     multiview_mask: None,
                 });
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
-                draw_scene(&mut pass, world, scene, false);
+                draw_scene(&mut pass, world, scene, false, false);
             }
             {
                 let image = self.play_image.as_ref().expect("play image");
@@ -1753,8 +1843,8 @@ impl GpuState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_world_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
+                    view: if msaa { &world.msaa_view } else { &view },
+                    resolve_target: if msaa { Some(&view) } else { None },
                     depth_slice: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1780,7 +1870,7 @@ impl GpuState {
             });
             pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
             pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
-            draw_scene(&mut pass, world, scene, false);
+            draw_scene(&mut pass, world, scene, false, msaa);
         }
 
         {
@@ -2353,6 +2443,7 @@ impl GpuState {
                 crate::hw::VOXEL_LIGHT_ROWS.max(0) as f32,
                 self.trace.max_light,
             ],
+            fixtures: unsafe { crate::fixture_lights::collect_for_scene(scene) },
         };
         queue.write_buffer(&ray.uniform, 0, bytemuck::bytes_of(&uniform));
         true
@@ -2648,6 +2739,9 @@ impl GpuState {
                 multiview_mask: None,
                 cache: None,
             });
+        let pipeline_msaa = world_msaa_pipeline(&self.device, &pipeline_layout, &shader, self.config.format, false);
+        let weapon_pipeline_msaa = world_msaa_pipeline(&self.device, &pipeline_layout, &shader, self.config.format, true);
+        let (msaa_color, msaa_view) = msaa_color_target(&self.device, 1, 1, self.config.format);
         let (depth, depth_view) = depth_target(&self.device, self.config.width, self.config.height);
         let (vertex_usage, index_usage) = mesh_usage(self.ray_query);
         let vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -2681,6 +2775,11 @@ impl GpuState {
             bind_group,
             pipeline,
             weapon_pipeline,
+            pipeline_msaa,
+            weapon_pipeline_msaa,
+            _msaa_color: msaa_color,
+            msaa_view,
+            depth_samples: 1,
             depth,
             depth_view,
             depth_size: (self.config.width, self.config.height),
@@ -3017,6 +3116,7 @@ fn draw_scene<'a>(
     world: &'a WorldGpu,
     scene: &crate::hw::Scene,
     trace: bool,
+    msaa: bool,
 ) {
     pass.set_vertex_buffer(0, world.vertices.slice(..));
     pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -3028,12 +3128,12 @@ fn draw_scene<'a>(
         pass.set_bind_group(0, &ray.bind_group, &[]);
         pass.draw(0..6, 0..1);
     } else if world_n > 0 {
-        pass.set_pipeline(&world.pipeline);
+        pass.set_pipeline(if msaa { &world.pipeline_msaa } else { &world.pipeline });
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(0..world_n, 0, 0..1);
     }
     if !trace && total > world_n {
-        pass.set_pipeline(&world.weapon_pipeline);
+        pass.set_pipeline(if msaa { &world.weapon_pipeline_msaa } else { &world.weapon_pipeline });
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(world_n..total, 0, 0..1);
     }
@@ -3150,6 +3250,10 @@ fn depth_target(
     width: u32,
     height: u32,
 ) -> (wgpu::Texture, wgpu::TextureView) {
+    depth_target_samples(device, width, height, 1)
+}
+
+fn depth_target_samples(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("doom_depth"),
         size: wgpu::Extent3d {
@@ -3158,7 +3262,7 @@ fn depth_target(
             depth_or_array_layers: 1,
         },
         mip_level_count: 1,
-        sample_count: 1,
+        sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth24Plus,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -3227,6 +3331,7 @@ struct RayUniform {
     light: [f32; 4],
     /// x: minimum display light.
     fill: [f32; 4],
+    fixtures: crate::fixture_lights::FixtureLights,
 }
 
 fn mesh_usage(ray: bool) -> (wgpu::BufferUsages, wgpu::BufferUsages) {
@@ -3413,7 +3518,7 @@ fn create_ray_pipeline(
     });
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doom_ray_camera"),
-        size: 256,
+        size: std::mem::size_of::<RayUniform>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });
@@ -4149,6 +4254,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 
@@ -4444,6 +4550,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 
@@ -4746,6 +4853,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 0.0, 1.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
 
@@ -4878,3 +4986,12 @@ mod ray_test {
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod ray_sidedef_test;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod fixture_light_test;
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod msaa_test;
+
+mod msaa;
+use msaa::{msaa_color_target, world_msaa_pipeline};

@@ -5,6 +5,7 @@ use wgpu::util::DeviceExt;
 // and light UVs. Depth testing cannot choose which sidedef faces the player.
 #[test]
 fn opposite_wall_materials_stay_on_their_own_side() {
+    for samples in [1, 4] {
     pollster::block_on(async {
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
@@ -36,7 +37,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
             }),
             primitive: Default::default(),
             depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less)),
-            multisample: Default::default(),
+            multisample: wgpu::MultisampleState { count: samples, ..Default::default() },
             multiview_mask: None,
             cache: None,
         });
@@ -135,7 +136,8 @@ fn opposite_wall_materials_stay_on_their_own_side() {
             view_formats: &[],
         });
         let view = output.create_view(&Default::default());
-        let (_depth, depth) = depth_target(&device, 16, 16);
+        let (_depth, depth) = depth_target_samples(&device, 16, 16, samples);
+        let (_msaa_color, msaa_view) = msaa_color_target(&device, 16, 16, wgpu::TextureFormat::Rgba8Unorm);
         let read = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
             size: 256,
@@ -238,9 +240,9 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                         label: None,
                                         color_attachments: &[Some(
                                             wgpu::RenderPassColorAttachment {
-                                                view: &view,
+                                                view: if samples == 4 { &msaa_view } else { &view },
                                                 depth_slice: None,
-                                                resolve_target: None,
+                                                resolve_target: if samples == 4 { Some(&view) } else { None },
                                                 ops: wgpu::Operations {
                                                     load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                                                     store: wgpu::StoreOp::Store,
@@ -320,4 +322,5 @@ fn opposite_wall_materials_stay_on_their_own_side() {
             }
         }
     });
+    }
 }

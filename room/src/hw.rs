@@ -1053,6 +1053,7 @@ unsafe fn push_flat(
     if sector.ceilingpic as i32 != skyflatnum {
         let ceil_rect = flat_rect(atlas, sector.ceilingpic as i32);
         if ceil_rect != [0.0; 4] {
+            let start = verts.len();
             fan(
                 verts,
                 indices,
@@ -1062,6 +1063,9 @@ unsafe fn push_flat(
                 light,
                 ceil_light,
             );
+            if crate::fixture_lights::is_ceiling_panel(&flat_name(sector.ceilingpic as i32)) {
+                for vertex in &mut verts[start..] { vertex._pad = -0.25; }
+            }
         }
     }
 }

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": null,
+  "installCommand": "",
+  "buildCommand": "python3 tools/web_release.py build",
+  "outputDirectory": "out/vercel",
+  "redirects": [
+    { "source": "/water", "destination": "/water/", "permanent": false }
+  ],
+  "headers": [
+    { "source": "/", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/index.html", "headers": [{ "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }] },
+    { "source": "/assets/(.*)", "headers": [{ "key": "Cache-Control", "value": "public, max-age=31536000, immutable" }] },
+    { "source": "/(.*\\.wasm)", "headers": [{ "key": "Content-Type", "value": "application/wasm" }] },
+    { "source": "/light/(.*)", "headers": [
+      { "key": "Content-Type", "value": "application/octet-stream" },
+      { "key": "Content-Encoding", "value": "gzip" },
+      { "key": "Cache-Control", "value": "public, max-age=0, must-revalidate" }
+    ] }
+  ]
+}

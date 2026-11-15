@@ -52,6 +52,14 @@ pub fn model_for(sprite: i32, frame: i32, leveltime: i32) -> Option<(Arc<VoxelMe
     Some((mesh, def.angle + def.spin * seconds))
 }
 
+/// Height of the model's top relative to its feet, without decoding/meshing it.
+/// KVX and sprite pivots differ (the COLU bulb is at z=43, not z=33).
+pub fn model_top(sprite: i32, frame: i32) -> Option<f32> {
+    let def = defs().get(&sprite_key(sprite, frame)?)?;
+    let data = file_bytes(&def.file)?;
+    Some(i32::from_le_bytes(data.get(24..28)?.try_into().ok()?) as f32 / 256.0)
+}
+
 fn sprite_key(sprite: i32, frame: i32) -> Option<String> {
     if sprite < 0 {
         return None;

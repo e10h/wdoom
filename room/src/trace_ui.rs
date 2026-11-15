@@ -141,6 +141,7 @@ impl TraceUi {
                     }
                 } else {
                     ui.checkbox(&mut controls.doom_res, "Doom resolution");
+                    ui.add_enabled(!controls.doom_res, egui::Checkbox::new(&mut controls.msaa, "4× MSAA"));
                     ui.label(if controls.doom_res {
                         format!(
                             "Raster play {}×{} (nearest upscale, classic view size)",

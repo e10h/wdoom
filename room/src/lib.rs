@@ -71,6 +71,7 @@ pub mod headless;
 pub mod hw;
 pub mod platform;
 pub mod types;
+pub mod fixture_lights;
 pub mod voxel;
 #[cfg(target_arch = "wasm32")]
 pub mod web;

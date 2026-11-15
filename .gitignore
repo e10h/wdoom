@@ -6,3 +6,6 @@
 session-*.md
 *.bak
 
+/out/
+!vercel.json
+!web-dist/manifest.json
