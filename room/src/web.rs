@@ -350,3 +350,43 @@ pub fn set_msaa(enabled: bool) -> bool {
         }
     })
 }
+
+/// Check whether 4× MSAA is currently enabled.
+#[wasm_bindgen]
+pub fn is_msaa_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().is_some_and(|g| g.msaa())
+    })
+}
+
+/// Toggle SMAA post-antialiasing on/off. Works in both native resolution and Doom resolution modes.
+#[wasm_bindgen]
+pub fn toggle_smaa() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.toggle_smaa()
+        } else {
+            false
+        }
+    })
+}
+
+/// Explicitly enable or disable SMAA.
+#[wasm_bindgen]
+pub fn set_smaa(enabled: bool) -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_smaa(enabled)
+        } else {
+            false
+        }
+    })
+}
+
+/// Check whether SMAA is currently enabled.
+#[wasm_bindgen]
+pub fn is_smaa_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().is_some_and(|g| g.smaa())
+    })
+}

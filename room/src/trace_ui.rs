@@ -102,8 +102,7 @@ impl TraceUi {
                         .text("Max light"),
                 );
                 controls.max_light = controls.max_light.max(controls.min_light);
-                ui.add_enabled(!controls.playing() || !controls.doom_res,
-                    egui::Checkbox::new(&mut controls.smaa, "SMAA (0)"));
+                ui.checkbox(&mut controls.smaa, "SMAA (0)");
                 ui.add_enabled(controls.playing(), egui::Checkbox::new(&mut controls.neural,"Neural preview (9)"));
                 if controls.neural {
                     egui::ComboBox::from_label("DLSS mode")

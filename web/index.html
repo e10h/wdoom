@@ -18,6 +18,36 @@
       image-rendering: pixelated;
       image-rendering: crisp-edges;
     }
+    #controls {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      display: flex;
+      gap: 8px;
+      z-index: 10;
+    }
+    #controls button {
+      background: rgba(30, 30, 30, 0.75);
+      color: #bbb;
+      border: 1px solid #555;
+      border-radius: 4px;
+      padding: 6px 12px;
+      font: 12px monospace;
+      cursor: pointer;
+      backdrop-filter: blur(4px);
+      user-select: none;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    #controls button:hover {
+      background: rgba(50, 50, 50, 0.9);
+      color: #fff;
+      border-color: #888;
+    }
+    #controls button.active {
+      background: rgba(28, 100, 50, 0.85);
+      border-color: #3cb86b;
+      color: #fff;
+    }
     #status {
       position: fixed;
       left: 12px;
@@ -31,6 +61,10 @@
   </style>
 </head>
 <body>
+  <div id="controls">
+    <button id="btn-msaa" title="Toggle 4× hardware MSAA (\ or F7)">MSAA (4×): OFF</button>
+    <button id="btn-smaa" title="Toggle post-pixelization SMAA (0)">SMAA: OFF</button>
+  </div>
   <canvas id="doom-canvas" width="640" height="400" tabindex="0"></canvas>
   <div id="status">Loading…</div>
   <script type="module" src="index.js"></script>

@@ -870,7 +870,7 @@ impl Default for TraceSettings {
             max_light: 2.0,
             doom_res: true,
             msaa: false,
-            smaa: true,
+            smaa: false,
             neural: false,
             neural_strength: 1.0,
             neural_style: 2,
@@ -1449,9 +1449,20 @@ impl GpuState {
         }
     }
 
-    pub(crate) fn toggle_smaa(&mut self) {
+    pub(crate) fn toggle_smaa(&mut self) -> bool {
         self.trace.smaa = !self.trace.smaa;
         log::info!("SMAA {}", if self.trace.smaa { "on" } else { "off" });
+        self.trace.smaa
+    }
+
+    pub(crate) fn smaa(&self) -> bool {
+        self.trace.smaa
+    }
+
+    pub(crate) fn set_smaa(&mut self, enabled: bool) -> bool {
+        self.trace.smaa = enabled;
+        log::info!("SMAA {}", if self.trace.smaa { "on" } else { "off" });
+        self.trace.smaa
     }
 
     pub(crate) fn toggle_msaa(&mut self) -> bool {
@@ -1717,9 +1728,10 @@ impl GpuState {
         let nr_active=self.trace.neural && self.trace.playing() && self.nr_live.is_some();
         #[cfg(target_arch = "wasm32")]
         let nr_active = false;
-        // Keep classic nearest-neighbor pixels intact. Full-resolution Play and
-        // Bake can both use SMAA, including the resolved 4x MSAA image.
-        let smaa_enabled = self.trace.smaa && !doom_res && !nr_active;
+        // Keep classic nearest-neighbor pixels intact by default.
+        // When SMAA is enabled, post-pixelization morphological antialiasing
+        // smooths chunky pixel edges in Doom resolution, leaving HUD crisp.
+        let smaa_enabled = self.trace.smaa && !nr_active;
         if smaa_enabled {
             let size = (self.config.width, self.config.height);
             match self.smaa_target.as_mut() {

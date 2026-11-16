@@ -1,12 +1,40 @@
 /* @ts-self-types="./room.d.ts" */
 
 /**
+ * Check whether 4× MSAA is currently enabled.
+ * @returns {boolean}
+ */
+export function is_msaa_enabled() {
+    const ret = wasm.is_msaa_enabled();
+    return ret !== 0;
+}
+
+/**
+ * Check whether SMAA is currently enabled.
+ * @returns {boolean}
+ */
+export function is_smaa_enabled() {
+    const ret = wasm.is_smaa_enabled();
+    return ret !== 0;
+}
+
+/**
  * Explicitly enable or disable 4× MSAA.
  * @param {boolean} enabled
  * @returns {boolean}
  */
 export function set_msaa(enabled) {
     const ret = wasm.set_msaa(enabled);
+    return ret !== 0;
+}
+
+/**
+ * Explicitly enable or disable SMAA.
+ * @param {boolean} enabled
+ * @returns {boolean}
+ */
+export function set_smaa(enabled) {
+    const ret = wasm.set_smaa(enabled);
     return ret !== 0;
 }
 
@@ -36,6 +64,15 @@ export function start_doom(canvas_id, custom_wad) {
  */
 export function toggle_msaa() {
     const ret = wasm.toggle_msaa();
+    return ret !== 0;
+}
+
+/**
+ * Toggle SMAA post-antialiasing on/off. Works in both native resolution and Doom resolution modes.
+ * @returns {boolean}
+ */
+export function toggle_smaa() {
+    const ret = wasm.toggle_smaa();
     return ret !== 0;
 }
 function __wbg_get_imports() {
