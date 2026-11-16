@@ -1364,7 +1364,8 @@ unsafe fn push_billboard(
     let left = [cx - right[0] * offset, top, cz - right[2] * offset];
     let across = [right[0] * width, 0.0, right[2] * width];
     let down = ph as f32;
-    let (u0, u1) = if flip { (0.999, 0.0) } else { (0.0, 0.999) };
+    let (u0, u1) = if flip { (1.0, 0.0) } else { (0.0, 1.0) };
+    let start_vert = verts.len();
     push_quad(
         verts,
         indices,
@@ -1381,6 +1382,9 @@ unsafe fn push_billboard(
         false,
         vert_limit,
     );
+    for v in &mut verts[start_vert..] {
+        v._pad = 2.0;
+    }
 }
 
 unsafe fn push_weapon(
@@ -1440,7 +1444,7 @@ unsafe fn push_weapon(
             -cam_up[1] * height,
             -cam_up[2] * height,
         ];
-        let (u0, u1) = if flip { (0.999, 0.0) } else { (0.0, 0.999) };
+        let (u0, u1) = if flip { (1.0, 0.0) } else { (0.0, 1.0) };
         let corner = |a: [f32; 3], b: [f32; 3]| {
             [
                 origin[0] + a[0] + b[0],
@@ -1448,6 +1452,7 @@ unsafe fn push_weapon(
                 origin[2] + a[2] + b[2],
             ]
         };
+        let start_vert = verts.len();
         push_quad(
             verts,
             indices,
@@ -1464,6 +1469,9 @@ unsafe fn push_weapon(
             false,
             MAX_SCENE_VERTS,
         );
+        for v in &mut verts[start_vert..] {
+            v._pad = 2.0;
+        }
     }
 }
 

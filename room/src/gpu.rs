@@ -156,7 +156,18 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     if (in.surface < -0.5 && front) {
         discard;
     }
-    let tile = fract(in.uv);
+    // Sprites and weapon overlays (surface > 1.5) must never tile or wrap around.
+    if (in.surface > 1.5) {
+        if (in.uv.x < -0.001 || in.uv.x > 1.001 || in.uv.y < -0.001 || in.uv.y > 1.001) {
+            discard;
+        }
+    }
+    var tile = in.uv;
+    if (in.surface <= 1.5) {
+        tile = fract(in.uv);
+    } else {
+        tile = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
+    }
     let atlas_uv = vec2<f32>(
         mix(in.atlas.x, in.atlas.z, tile.x),
         mix(in.atlas.y, in.atlas.w, tile.y),
