@@ -102,6 +102,42 @@ impl TraceUi {
                         .text("Max light"),
                 );
                 controls.max_light = controls.max_light.max(controls.min_light);
+                ui.add_enabled(!controls.playing() || !controls.doom_res,
+                    egui::Checkbox::new(&mut controls.smaa, "SMAA (0)"));
+                ui.add_enabled(controls.playing(), egui::Checkbox::new(&mut controls.neural,"Neural preview (9)"));
+                if controls.neural {
+                    egui::ComboBox::from_label("DLSS mode")
+                        .selected_text(match controls.neural_mode {
+                            0 => "Split Comparison",
+                            1 => "Full DLSS-NR",
+                            _ => "Full Native 3D",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut controls.neural_mode, 0, "Split Comparison");
+                            ui.selectable_value(&mut controls.neural_mode, 1, "Full DLSS-NR");
+                            ui.selectable_value(&mut controls.neural_mode, 2, "Full Native 3D");
+                        });
+                    if controls.neural_mode == 0 {
+                        ui.add(egui::Slider::new(&mut controls.neural_split_x, 0.0..=1.0).text("Split position"));
+                    }
+                    ui.checkbox(&mut controls.neural_fsr, "FSR 3 EASU + RCAS");
+                    if controls.neural_fsr {
+                        ui.add(egui::Slider::new(&mut controls.neural_sharpness, 0.0..=2.0).text("RCAS sharpness"));
+                    }
+                    ui.add(egui::Slider::new(&mut controls.neural_strength, 0.0..=2.0).text("DLSS boost"));
+                    egui::ComboBox::from_label("DLSS style")
+                        .selected_text(match controls.neural_style {
+                            1 => "Natural",
+                            2 => "Cinematic",
+                            _ => "Neutral",
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut controls.neural_style, 0, "Neutral");
+                            ui.selectable_value(&mut controls.neural_style, 1, "Natural");
+                            ui.selectable_value(&mut controls.neural_style, 2, "Cinematic");
+                        });
+                    ui.small("Async 60 FPS DLSS-NR (FSR 3 EASU + RCAS relighting)");
+                }
                 if controls.baking() {
                     restart_bake = ui.button("Restart bake (keeps backup)").clicked();
                     ui.small("Bake resumes saved samples until you restart it.");
@@ -143,10 +179,17 @@ impl TraceUi {
                     ui.checkbox(&mut controls.doom_res, "Doom resolution");
                     ui.add_enabled(!controls.doom_res, egui::Checkbox::new(&mut controls.msaa, "4× MSAA"));
                     ui.label(if controls.doom_res {
-                        format!(
-                            "Raster play {}×{} (nearest upscale, classic view size)",
-                            traced.0, traced.1
-                        )
+                        if controls.neural {
+                            format!(
+                                "DLSS-NR upsampling {}×{} Doom raster via FSR 3",
+                                traced.0, traced.1
+                            )
+                        } else {
+                            format!(
+                                "Raster play {}×{} (nearest upscale, classic view size)",
+                                traced.0, traced.1
+                            )
+                        }
                     } else {
                         format!("Raster play {}×{}", traced.0, traced.1)
                     });

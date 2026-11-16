@@ -92,6 +92,24 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
     if repeat {
         return;
     }
+    if matches!(code, KeyCode::Digit8 | KeyCode::Numpad8) {
+        if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.cycle_neural_mode();}});}
+        return;
+    }
+    if matches!(code, KeyCode::Digit9 | KeyCode::Numpad9) {
+        if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.toggle_neural();}});}
+        return;
+    }
+    if matches!(code, KeyCode::Digit0 | KeyCode::Numpad0) {
+        if pressed {
+            GPU.with_borrow_mut(|gpu| {
+                if let Some(gpu) = gpu.as_mut() {
+                    gpu.toggle_smaa();
+                }
+            });
+        }
+        return;
+    }
     if code == KeyCode::Escape && pressed {
         release_pointer();
     }

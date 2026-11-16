@@ -2,6 +2,7 @@
 name = "room"
 version = "0.1.0"
 edition = "2021"
+default-run = "room"
 description = "A Rust implementation of the doomgeneric platform layer using winit and wgpu"
 repository = "https://github.com/sunsided/room"
 license = "GPL-2.0"
@@ -27,6 +28,7 @@ winit = "0.30"
 
 # Cross-platform GPU API.
 wgpu = { version = "29", features = ["wgsl", "webgl"] }
+smaa = "=0.20.0"
 
 # Blocking async executor – used to wait for wgpu futures.
 pollster = "0.4"
@@ -50,6 +52,8 @@ env_logger = "0.11"
 dhat = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Experimental native-only neural rendering; models remain external.
+neural-nr = { path = "../neural-nr" }
 # libc bindings for C FFI on native platforms
 libc = "0.2"
 # PNG brightmaps from the Brightmaps Plus pack.
