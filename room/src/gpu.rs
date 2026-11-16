@@ -156,17 +156,15 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     if (in.surface < -0.5 && front) {
         discard;
     }
-    // Sprites and weapon overlays (surface > 1.5) must never tile or wrap around.
+    // Sprites and actor billboards (surface > 1.5) must never tile or wrap around.
     if (in.surface > 1.5) {
-        if (in.uv.x < -0.001 || in.uv.x > 1.001 || in.uv.y < -0.001 || in.uv.y > 1.001) {
+        if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
             discard;
         }
     }
     var tile = in.uv;
     if (in.surface <= 1.5) {
         tile = fract(in.uv);
-    } else {
-        tile = clamp(in.uv, vec2<f32>(0.0), vec2<f32>(1.0));
     }
     let atlas_uv = vec2<f32>(
         mix(in.atlas.x, in.atlas.z, tile.x),
@@ -201,6 +199,30 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let glow = albedo * emission * camera.fill.y;
     // Same display-only self-glow as the native ray view: lift the emitter
     // without changing its baked light or washing away its texture pattern.
+    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
+    let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
+    return vec4<f32>(radiance, 1.0);
+}
+
+@fragment
+fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
+    if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
+        discard;
+    }
+    let atlas_uv = vec2<f32>(
+        mix(in.atlas.x, in.atlas.z, in.uv.x),
+        mix(in.atlas.y, in.atlas.w, in.uv.y),
+    );
+    let color = textureSampleLevel(atlas_tex, atlas_samp, atlas_uv, 0.0);
+    if (color.a < 0.5) {
+        discard;
+    }
+    let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
+    let incoming = clamp(vec3<f32>(in.light), vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    let albedo = color.rgb * in.tint;
+    let shaded = albedo * incoming;
+    let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
+    let glow = albedo * emission * camera.fill.y;
     let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
     let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
     return vec4<f32>(radiance, 1.0);
@@ -2977,7 +2999,7 @@ impl GpuState {
                 },
                 fragment: Some(wgpu::FragmentState {
                     module: &shader,
-                    entry_point: Some("fs_world"),
+                    entry_point: Some("fs_weapon"),
                     targets: &[Some(wgpu::ColorTargetState {
                         format: self.config.format,
                         blend: Some(wgpu::BlendState::REPLACE),

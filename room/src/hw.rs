@@ -1428,7 +1428,7 @@ unsafe fn push_weapon(
         let sx = fx(psp.sx);
         let sy = fx(psp.sy);
         let left_px = sx - offset - 160.0;
-        let top_px = sy - topoff - 0.5;
+        let top_px = sy - topoff;
         let top_up = 100.0 - top_px;
         let yoff = top_up * world_per_px;
         let mut origin = eye;

@@ -47,7 +47,7 @@ pub(super) fn world_msaa_pipeline(
         },
         fragment: Some(wgpu::FragmentState {
             module: shader,
-            entry_point: Some("fs_world"),
+            entry_point: Some(if weapon { "fs_weapon" } else { "fs_world" }),
             targets: &[Some(wgpu::ColorTargetState {
                 format,
                 blend: Some(wgpu::BlendState::REPLACE),
