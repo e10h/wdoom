@@ -110,6 +110,16 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
         }
         return;
     }
+    if matches!(code, KeyCode::Backslash | KeyCode::F7) {
+        if pressed {
+            GPU.with_borrow_mut(|gpu| {
+                if let Some(gpu) = gpu.as_mut() {
+                    gpu.toggle_msaa();
+                }
+            });
+        }
+        return;
+    }
     if code == KeyCode::Escape && pressed {
         release_pointer();
     }

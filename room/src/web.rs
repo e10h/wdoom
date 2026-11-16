@@ -326,3 +326,27 @@ pub fn start_doom(canvas_id: String, custom_wad: Option<Vec<u8>>) -> Result<(), 
 
     Ok(())
 }
+
+/// Toggle 4× MSAA on/off. Works in both native resolution and Doom resolution modes.
+#[wasm_bindgen]
+pub fn toggle_msaa() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.toggle_msaa()
+        } else {
+            false
+        }
+    })
+}
+
+/// Explicitly enable or disable 4× MSAA.
+#[wasm_bindgen]
+pub fn set_msaa(enabled: bool) -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_msaa(enabled)
+        } else {
+            false
+        }
+    })
+}

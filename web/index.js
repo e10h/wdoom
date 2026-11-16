@@ -1,4 +1,7 @@
-import init, { start_doom } from './pkg/room.js';
+import init, { start_doom, toggle_msaa, set_msaa } from './pkg/room.js';
+
+window.toggle_msaa = toggle_msaa;
+window.set_msaa = set_msaa;
 
 const canvas = document.getElementById('doom-canvas');
 const status = document.getElementById('status');

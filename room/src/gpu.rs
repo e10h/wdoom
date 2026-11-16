@@ -869,7 +869,7 @@ impl Default for TraceSettings {
             min_light: 0.23,
             max_light: 2.0,
             doom_res: true,
-            msaa: true,
+            msaa: false,
             smaa: true,
             neural: false,
             neural_strength: 1.0,
@@ -940,8 +940,11 @@ struct PlayImage {
     view: wgpu::TextureView,
     _depth: wgpu::Texture,
     depth_view: wgpu::TextureView,
+    _msaa_color: Option<wgpu::Texture>,
+    msaa_view: Option<wgpu::TextureView>,
     bind: wgpu::BindGroup,
     size: (u32, u32),
+    samples: u32,
 }
 
 struct RayGpu {
@@ -1451,6 +1454,22 @@ impl GpuState {
         log::info!("SMAA {}", if self.trace.smaa { "on" } else { "off" });
     }
 
+    pub(crate) fn toggle_msaa(&mut self) -> bool {
+        self.trace.msaa = !self.trace.msaa;
+        log::info!("4× MSAA {}", if self.trace.msaa { "on" } else { "off" });
+        self.trace.msaa
+    }
+
+    pub(crate) fn msaa(&self) -> bool {
+        self.trace.msaa
+    }
+
+    pub(crate) fn set_msaa(&mut self, enabled: bool) -> bool {
+        self.trace.msaa = enabled;
+        log::info!("4× MSAA {}", if self.trace.msaa { "on" } else { "off" });
+        self.trace.msaa
+    }
+
     /// Reconfigure the surface after a window resize.
     ///
     /// This must be called whenever the window's inner size changes, before
@@ -1617,7 +1636,7 @@ impl GpuState {
         // Play is plain raster × light map. Only bake builds rays / BLAS.
         let baking = self.trace.baking();
         let doom_res = self.trace.playing() && self.trace.doom_res;
-        let msaa = self.trace.playing() && self.trace.msaa && !doom_res;
+        let msaa = self.trace.playing() && self.trace.msaa;
         let (rw, rh) = if baking {
             ray_extent(vw, vh, self.trace.height)
         } else if doom_res {
@@ -1643,7 +1662,8 @@ impl GpuState {
             self.ensure_ray_image(rw, rh);
             self.ensure_ray_present_bind();
         } else if doom_res {
-            self.ensure_play_image(rw, rh);
+            let samples = if msaa { 4 } else { 1 };
+            self.ensure_play_image(rw, rh, samples);
         } else if let Some(world) = self.world.as_mut() {
             let samples = if msaa { 4 } else { 1 };
             let resized = world.depth_size != (self.config.width, self.config.height);
@@ -1960,11 +1980,17 @@ impl GpuState {
             {
                 let image = self.play_image.as_ref().expect("play image");
                 let world = self.world.as_ref().expect("world");
+                let color_view = if msaa {
+                    image.msaa_view.as_ref().expect("play msaa view")
+                } else {
+                    &image.view
+                };
+                let resolve_target = if msaa { Some(&image.view) } else { None };
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("doom_play_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &image.view,
-                        resolve_target: None,
+                        view: color_view,
+                        resolve_target,
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -1989,7 +2015,7 @@ impl GpuState {
                     multiview_mask: None,
                 });
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
-                draw_scene(&mut pass, world, scene, false, false);
+                draw_scene(&mut pass, world, scene, false, msaa);
             }
             #[cfg(not(target_arch = "wasm32"))]
             let handled_by_nr = if nr_active {
@@ -2431,18 +2457,24 @@ impl GpuState {
         }
     }
 
-    fn ensure_play_image(&mut self, width: u32, height: u32) {
+    fn ensure_play_image(&mut self, width: u32, height: u32, samples: u32) {
         if self
             .play_image
             .as_ref()
-            .is_some_and(|image| image.size == (width, height))
+            .is_some_and(|image| image.size == (width, height) && image.samples == samples)
         {
             return;
         }
         let format = self.config.format;
         let color = ray_target(&self.device, width, height, format, true);
         let view = color.create_view(&wgpu::TextureViewDescriptor::default());
-        let (depth, depth_view) = depth_target(&self.device, width, height);
+        let (depth, depth_view) = depth_target_samples(&self.device, width, height, samples);
+        let (msaa_color, msaa_view) = if samples > 1 {
+            let (c, v) = msaa_color_target(&self.device, width, height, format);
+            (Some(c), Some(v))
+        } else {
+            (None, None)
+        };
         let bind = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("doom_play_blit_group"),
             layout: &self.blit.layout,
@@ -2462,8 +2494,11 @@ impl GpuState {
             view,
             _depth: depth,
             depth_view,
+            _msaa_color: msaa_color,
+            msaa_view,
             bind,
             size: (width, height),
+            samples,
         });
     }
 

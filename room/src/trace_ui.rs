@@ -177,11 +177,16 @@ impl TraceUi {
                     }
                 } else {
                     ui.checkbox(&mut controls.doom_res, "Doom resolution");
-                    ui.add_enabled(!controls.doom_res, egui::Checkbox::new(&mut controls.msaa, "4× MSAA"));
+                    ui.checkbox(&mut controls.msaa, "4× MSAA (\\, F7)");
                     ui.label(if controls.doom_res {
                         if controls.neural {
                             format!(
                                 "DLSS-NR upsampling {}×{} Doom raster via FSR 3",
+                                traced.0, traced.1
+                            )
+                        } else if controls.msaa {
+                            format!(
+                                "Raster play {}×{} (4× MSAA resolved, nearest upscale)",
                                 traced.0, traced.1
                             )
                         } else {
@@ -190,6 +195,8 @@ impl TraceUi {
                                 traced.0, traced.1
                             )
                         }
+                    } else if controls.msaa {
+                        format!("Raster play {}×{} (4× MSAA native)", traced.0, traced.1)
                     } else {
                         format!("Raster play {}×{}", traced.0, traced.1)
                     });

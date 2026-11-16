@@ -1,6 +1,16 @@
 /* @ts-self-types="./room.d.ts" */
 
 /**
+ * Explicitly enable or disable 4× MSAA.
+ * @param {boolean} enabled
+ * @returns {boolean}
+ */
+export function set_msaa(enabled) {
+    const ret = wasm.set_msaa(enabled);
+    return ret !== 0;
+}
+
+/**
  * Start running Doom inside the web browser.
  *
  * # Arguments
@@ -18,6 +28,15 @@ export function start_doom(canvas_id, custom_wad) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * Toggle 4× MSAA on/off. Works in both native resolution and Doom resolution modes.
+ * @returns {boolean}
+ */
+export function toggle_msaa() {
+    const ret = wasm.toggle_msaa();
+    return ret !== 0;
 }
 function __wbg_get_imports() {
     const import0 = {
