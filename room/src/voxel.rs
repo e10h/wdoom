@@ -34,6 +34,38 @@ pub struct VoxelMesh {
     pub palette: [[u8; 3]; 256],
 }
 
+/// GPU-ready local-space voxel vertex (24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+pub struct VoxelVertex {
+    pub pos: [f32; 3],
+    pub tint: [f32; 3],
+}
+
+impl VoxelMesh {
+    pub fn build_gpu_mesh(&self) -> (Vec<VoxelVertex>, Vec<u32>) {
+        let mut verts = Vec::with_capacity(self.quads.len() * 4);
+        let mut indices = Vec::with_capacity(self.quads.len() * 6);
+        for quad in &self.quads {
+            let base = verts.len() as u32;
+            let rgb = self.palette[quad.color as usize];
+            let tint = [
+                rgb[0] as f32 / 255.0,
+                rgb[1] as f32 / 255.0,
+                rgb[2] as f32 / 255.0,
+            ];
+            for i in 0..4 {
+                verts.push(VoxelVertex {
+                    pos: quad.p[i],
+                    tint,
+                });
+            }
+            indices.extend_from_slice(&[base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (verts, indices)
+    }
+}
+
 struct Def {
     file: String,
     /// Extra yaw in radians, including the spin accumulated so far is applied

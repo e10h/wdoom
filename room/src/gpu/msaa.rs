@@ -76,3 +76,43 @@ pub(super) fn world_msaa_pipeline(
         cache: None,
     })
 }
+
+pub(super) fn voxel_msaa_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("doom_msaa_voxel"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_voxel"),
+            buffers: &[voxel_vertex_layout(), voxel_instance_layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_voxel"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::REPLACE),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less)),
+        multisample: wgpu::MultisampleState {
+            count: 4,
+            ..Default::default()
+        },
+        multiview_mask: None,
+        cache: None,
+    })
+}

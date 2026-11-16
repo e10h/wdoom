@@ -30,7 +30,7 @@ use crate::doom::r_sky::{skyflatnum, skytexture};
 use crate::doom::r_things::{hw_psprite_lump, hw_sprite_lump};
 use crate::doom::w_wad::{W_CacheLumpNum, W_LumpLength};
 use crate::doom::z_zone::PU_CACHE;
-use crate::voxel::{self, VoxelMesh};
+use crate::voxel;
 use std::collections::{BTreeMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -87,17 +87,36 @@ pub struct Vertex {
     pub light_uv: [f32; 2],
 }
 
+/// One instance of a voxel model in the world (24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+pub struct VoxelInstance {
+    pub origin: [f32; 3],
+    pub sin_yaw: f32,
+    pub cos_yaw: f32,
+    pub light: f32,
+}
+
+/// A collection of world instances sharing a single voxel model mesh.
+#[derive(Clone)]
+pub struct VoxelBatch {
+    pub mesh: Arc<crate::voxel::VoxelMesh>,
+    pub instances: Vec<VoxelInstance>,
+}
+
 /// One frame of world geometry plus the camera and the HUD hole.
 pub struct Scene {
     pub verts: Vec<Vertex>,
     pub indices: Vec<u32>,
-    /// Index count of sky, walls, flats, and voxel models. Hardware ray
+    /// Index count of sky, walls, and flats. Hardware ray
     /// tracing traces this prefix. Billboard sprites follow, through
     /// `world_indices`, and stay rasterized so their transparent texels discard.
     pub opaque_indices: u32,
     /// Index count of sky, walls, flats, and sprites. The rest are the weapon,
     /// drawn with depth testing disabled so nearby walls do not clip it.
     pub world_indices: u32,
+    /// Instanced voxel models, drawn with GPU instancing.
+    pub voxel_batches: Vec<VoxelBatch>,
     pub view_proj: [[f32; 4]; 4],
     /// Camera basis for primary rays. `right`, `up`, and `forward` are unit
     /// vectors. `aspect` is the projection aspect used by [`view_proj`].
@@ -142,6 +161,7 @@ struct Atlas {
 struct Scratch {
     verts: Vec<Vertex>,
     indices: Vec<u32>,
+    voxel_batches: Vec<VoxelBatch>,
     atlas: Option<Atlas>,
     /// Closed floor outlines in Doom map units, one per subsector.
     /// Rebuilt when a new map is loaded. Segs alone do not form these
@@ -154,6 +174,7 @@ struct Scratch {
 static mut SCRATCH: Scratch = Scratch {
     verts: Vec::new(),
     indices: Vec::new(),
+    voxel_batches: Vec::new(),
     atlas: None,
     flats: Vec::new(),
     flats_key: 0,
@@ -185,6 +206,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     let atlas_upload = ensure_atlas(scratch);
     scratch.verts.clear();
     scratch.indices.clear();
+    scratch.voxel_batches.clear();
 
     let eye = [fx(viewx), fx(viewz), -fx(viewy)];
     let ang = viewangle as f32 * std::f32::consts::TAU / 4294967296.0;
@@ -207,6 +229,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     if commit.rebuild {
         scratch.verts.clear();
         scratch.indices.clear();
+        scratch.voxel_batches.clear();
         light_reuse();
         (opaque_indices, world_indices) =
             fill_scene(scratch, eye, ang, right, forward, cam_up, actors);
@@ -232,11 +255,13 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
 
     let verts = std::mem::take(&mut scratch.verts);
     let indices = std::mem::take(&mut scratch.indices);
+    let voxel_batches = std::mem::take(&mut scratch.voxel_batches);
     Scene {
         verts,
         indices,
         opaque_indices,
         world_indices,
+        voxel_batches,
         view_proj,
         eye,
         right,
@@ -291,6 +316,7 @@ unsafe fn fill_scene(
             push_sprites(
                 &mut scratch.verts,
                 &mut scratch.indices,
+                &mut scratch.voxel_batches,
                 atlas,
                 right,
                 true,
@@ -304,6 +330,7 @@ unsafe fn fill_scene(
             push_sprites(
                 &mut scratch.verts,
                 &mut scratch.indices,
+                &mut scratch.voxel_batches,
                 atlas,
                 right,
                 false,
@@ -326,6 +353,7 @@ pub fn recycle(scene: Scene) {
         let scratch = &mut *std::ptr::addr_of_mut!(SCRATCH);
         scratch.verts = scene.verts;
         scratch.indices = scene.indices;
+        scratch.voxel_batches = scene.voxel_batches;
     }
 }
 
@@ -1279,6 +1307,7 @@ fn dedup_poly(poly: &mut Vec<[f32; 2]>) {
 unsafe fn push_sprites(
     verts: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
+    voxel_batches: &mut Vec<VoxelBatch>,
     atlas: &Atlas,
     right: [f32; 3],
     voxels: bool,
@@ -1320,7 +1349,22 @@ unsafe fn push_sprites(
             }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
-                    push_voxel(verts, indices, atlas, th, &mesh, extra, light, vert_limit);
+                    let yaw = (th.angle as f32) * std::f32::consts::TAU / 4294967296.0 + extra;
+                    let (s, c) = yaw.sin_cos();
+                    let inst = VoxelInstance {
+                        origin: [fx(th.x), fx(th.z), -fx(th.y)],
+                        sin_yaw: s,
+                        cos_yaw: c,
+                        light,
+                    };
+                    if let Some(batch) = voxel_batches.iter_mut().find(|b| Arc::ptr_eq(&b.mesh, &mesh)) {
+                        batch.instances.push(inst);
+                    } else {
+                        voxel_batches.push(VoxelBatch {
+                            mesh,
+                            instances: vec![inst],
+                        });
+                    }
                 }
                 continue;
             }
@@ -1475,56 +1519,6 @@ unsafe fn push_weapon(
     }
 }
 
-fn push_voxel(
-    verts: &mut Vec<Vertex>,
-    indices: &mut Vec<u32>,
-    atlas: &Atlas,
-    th: &mobj_t,
-    mesh: &Arc<VoxelMesh>,
-    extra_yaw: f32,
-    light: f32,
-    vert_limit: usize,
-) {
-    let yaw = (th.angle as f32) * std::f32::consts::TAU / 4294967296.0 + extra_yaw;
-    let (s, c) = yaw.sin_cos();
-    let ox = fx(th.x);
-    let oy = fx(th.z);
-    let oz = -fx(th.y);
-    let uv = [[0.5, 0.5]; 4];
-    // Play mode lights actors from the floor under them. No light rectangle,
-    // so a walk cycle cannot thrash the light map.
-    let light_uv = [[-1.0, -1.0]; 4];
-    for quad in mesh.quads.iter() {
-        if verts.len() + 4 > vert_limit {
-            break;
-        }
-        let mut p = [[0.0; 3]; 4];
-        for i in 0..4 {
-            let m = quad.p[i];
-            p[i] = [
-                ox + c * m[1] + s * m[0],
-                oy + m[2],
-                oz - s * m[1] + c * m[0],
-            ];
-        }
-        let rgb = mesh.palette[quad.color as usize];
-        push_quad_at(
-            verts,
-            indices,
-            p,
-            uv,
-            atlas.white,
-            light,
-            [
-                rgb[0] as f32 / 255.0,
-                rgb[1] as f32 / 255.0,
-                rgb[2] as f32 / 255.0,
-            ],
-            light_uv,
-            vert_limit,
-        );
-    }
-}
 
 fn push_quad(
     verts: &mut Vec<Vertex>,

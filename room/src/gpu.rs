@@ -227,6 +227,43 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
     return vec4<f32>(radiance, 1.0);
 }
+
+struct VoxelVertexInput {
+    @location(0) pos: vec3<f32>,
+    @location(1) tint: vec3<f32>,
+};
+
+struct VoxelInstanceInput {
+    @location(2) origin: vec3<f32>,
+    @location(3) sin_yaw: f32,
+    @location(4) cos_yaw: f32,
+    @location(5) light: f32,
+};
+
+struct VoxelVertexOutput {
+    @builtin(position) clip_position: vec4<f32>,
+    @location(0) color: vec3<f32>,
+};
+
+@vertex
+fn vs_voxel(v: VoxelVertexInput, inst: VoxelInstanceInput) -> VoxelVertexOutput {
+    var out: VoxelVertexOutput;
+    let world_pos = vec3<f32>(
+        inst.origin.x + inst.cos_yaw * v.pos.y + inst.sin_yaw * v.pos.x,
+        inst.origin.y + v.pos.z,
+        inst.origin.z - inst.sin_yaw * v.pos.y + inst.cos_yaw * v.pos.x,
+    );
+    out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
+    let incoming = clamp(inst.light, camera.fill.x, ceiling);
+    out.color = v.tint * incoming;
+    return out;
+}
+
+@fragment
+fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
+    return vec4<f32>(in.color, 1.0);
+}
 "#;
 
 /// Software frame with the 3D viewport punched out, so the status bar and
@@ -796,8 +833,10 @@ struct WorldGpu {
     bind_group: wgpu::BindGroup,
     pipeline: wgpu::RenderPipeline,
     weapon_pipeline: wgpu::RenderPipeline,
+    voxel_pipeline: wgpu::RenderPipeline,
     pipeline_msaa: wgpu::RenderPipeline,
     weapon_pipeline_msaa: wgpu::RenderPipeline,
+    voxel_pipeline_msaa: wgpu::RenderPipeline,
     _msaa_color: wgpu::Texture,
     msaa_view: wgpu::TextureView,
     depth_samples: u32,
@@ -809,6 +848,17 @@ struct WorldGpu {
     indices: wgpu::Buffer,
     vertex_cap: u64,
     index_cap: u64,
+    voxel_mesh_cache: std::collections::HashMap<usize, (u32, u32)>,
+    voxel_vertices_cpu: Vec<crate::voxel::VoxelVertex>,
+    voxel_indices_cpu: Vec<u32>,
+    voxel_mesh_dirty: bool,
+    voxel_vertices: wgpu::Buffer,
+    voxel_indices: wgpu::Buffer,
+    voxel_instances: wgpu::Buffer,
+    voxel_vert_cap: u64,
+    voxel_index_cap: u64,
+    voxel_inst_cap: u64,
+    voxel_instances_len: usize,
     /// Hardware ray queries are available on this device.
     ray_query: bool,
     ray: Option<RayGpu>,
@@ -3066,6 +3116,38 @@ impl GpuState {
             });
         let pipeline_msaa = world_msaa_pipeline(&self.device, &pipeline_layout, &shader, self.config.format, false);
         let weapon_pipeline_msaa = world_msaa_pipeline(&self.device, &pipeline_layout, &shader, self.config.format, true);
+        let voxel_pipeline = self
+            .device
+            .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("doom_voxel_pipeline"),
+                layout: Some(&pipeline_layout),
+                vertex: wgpu::VertexState {
+                    module: &shader,
+                    entry_point: Some("vs_voxel"),
+                    buffers: &[voxel_vertex_layout(), voxel_instance_layout()],
+                    compilation_options: Default::default(),
+                },
+                fragment: Some(wgpu::FragmentState {
+                    module: &shader,
+                    entry_point: Some("fs_voxel"),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: self.config.format,
+                        blend: Some(wgpu::BlendState::REPLACE),
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                    compilation_options: Default::default(),
+                }),
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(depth_state(true, wgpu::CompareFunction::Less)),
+                multisample: wgpu::MultisampleState::default(),
+                multiview_mask: None,
+                cache: None,
+            });
+        let voxel_pipeline_msaa = voxel_msaa_pipeline(&self.device, &pipeline_layout, &shader, self.config.format);
         let (msaa_color, msaa_view) = msaa_color_target(&self.device, 1, 1, self.config.format);
         let (depth, depth_view) = depth_target(&self.device, self.config.width, self.config.height);
         let (vertex_usage, index_usage) = mesh_usage(self.ray_query);
@@ -3079,6 +3161,24 @@ impl GpuState {
             label: Some("doom_indices"),
             size: 64 * 1024,
             usage: index_usage,
+            mapped_at_creation: false,
+        });
+        let voxel_vertices = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_voxel_vertices"),
+            size: 64 * 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_indices = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_voxel_indices"),
+            size: 64 * 1024,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let voxel_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_voxel_instances"),
+            size: 4 * 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
         let light_hits = light_hit_buffer(&self.device, LIGHT_HIT_CAP);
@@ -3100,8 +3200,10 @@ impl GpuState {
             bind_group,
             pipeline,
             weapon_pipeline,
+            voxel_pipeline,
             pipeline_msaa,
             weapon_pipeline_msaa,
+            voxel_pipeline_msaa,
             _msaa_color: msaa_color,
             msaa_view,
             depth_samples: 1,
@@ -3113,6 +3215,17 @@ impl GpuState {
             indices,
             vertex_cap: 64 * 1024,
             index_cap: 64 * 1024,
+            voxel_mesh_cache: std::collections::HashMap::new(),
+            voxel_vertices_cpu: Vec::new(),
+            voxel_indices_cpu: Vec::new(),
+            voxel_mesh_dirty: false,
+            voxel_vertices,
+            voxel_indices,
+            voxel_instances,
+            voxel_vert_cap: 64 * 1024,
+            voxel_index_cap: 64 * 1024,
+            voxel_inst_cap: 4 * 1024,
+            voxel_instances_len: 0,
             ray_query: self.ray_query,
             ray: None,
         });
@@ -3170,6 +3283,58 @@ fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
         array_stride: std::mem::size_of::<crate::hw::Vertex>() as u64,
         step_mode: wgpu::VertexStepMode::Vertex,
         attributes: &VERTEX_ATTRS,
+    }
+}
+
+const VOXEL_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 12,
+        shader_location: 1,
+    },
+];
+
+const VOXEL_INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 12,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 16,
+        shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 20,
+        shader_location: 5,
+    },
+];
+
+pub(super) fn voxel_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::voxel::VoxelVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &VOXEL_VERTEX_ATTRS,
+    }
+}
+
+pub(super) fn voxel_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::hw::VoxelInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &VOXEL_INSTANCE_ATTRS,
     }
 }
 
@@ -3436,6 +3601,36 @@ fn ray_extent(view_w: f32, view_h: f32, max_h: u32) -> (u32, u32) {
     (w.max(1), h.max(1))
 }
 
+impl WorldGpu {
+    fn draw_voxels<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, scene: &crate::hw::Scene, msaa: bool) {
+        if scene.voxel_batches.is_empty() || self.voxel_instances_len == 0 {
+            return;
+        }
+        pass.set_pipeline(if msaa { &self.voxel_pipeline_msaa } else { &self.voxel_pipeline });
+        pass.set_bind_group(0, &self.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.voxel_vertices.slice(..));
+        pass.set_vertex_buffer(1, self.voxel_instances.slice(..));
+        pass.set_index_buffer(self.voxel_indices.slice(..), wgpu::IndexFormat::Uint32);
+
+        let mut inst_start: u32 = 0;
+        for batch in &scene.voxel_batches {
+            let count = batch.instances.len() as u32;
+            if count == 0 {
+                continue;
+            }
+            let key = Arc::as_ptr(&batch.mesh) as usize;
+            if let Some(&(first_index, index_count)) = self.voxel_mesh_cache.get(&key) {
+                pass.draw_indexed(
+                    first_index..(first_index + index_count),
+                    0,
+                    inst_start..(inst_start + count),
+                );
+            }
+            inst_start += count;
+        }
+    }
+}
+
 fn draw_scene<'a>(
     pass: &mut wgpu::RenderPass<'a>,
     world: &'a WorldGpu,
@@ -3457,7 +3652,12 @@ fn draw_scene<'a>(
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(0..world_n, 0, 0..1);
     }
+    if !trace {
+        world.draw_voxels(pass, scene, msaa);
+    }
     if !trace && total > world_n {
+        pass.set_vertex_buffer(0, world.vertices.slice(..));
+        pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_pipeline(if msaa { &world.weapon_pipeline_msaa } else { &world.weapon_pipeline });
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(world_n..total, 0, 0..1);
@@ -3479,7 +3679,10 @@ fn draw_overlays<'a>(
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(sprites..world_n, 0, 0..1);
     }
+    world.draw_voxels(pass, scene, false);
     if total > world_n {
+        pass.set_vertex_buffer(0, world.vertices.slice(..));
+        pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_pipeline(&world.weapon_pipeline);
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(world_n..total, 0, 0..1);
@@ -3631,6 +3834,75 @@ fn upload_mesh(
     }
     if !i_bytes.is_empty() {
         queue.write_buffer(&world.indices, 0, i_bytes);
+    }
+
+    // Voxel mesh caching and static geometry upload
+    for batch in &scene.voxel_batches {
+        let key = Arc::as_ptr(&batch.mesh) as usize;
+        if !world.voxel_mesh_cache.contains_key(&key) {
+            let (v, i) = batch.mesh.build_gpu_mesh();
+            let base_vertex = world.voxel_vertices_cpu.len() as u32;
+            let first_index = world.voxel_indices_cpu.len() as u32;
+            let index_count = i.len() as u32;
+
+            world.voxel_vertices_cpu.extend_from_slice(&v);
+            world.voxel_indices_cpu.extend(i.iter().map(|&idx| idx + base_vertex));
+            world.voxel_mesh_cache.insert(key, (first_index, index_count));
+            world.voxel_mesh_dirty = true;
+        }
+    }
+    if world.voxel_mesh_dirty {
+        world.voxel_mesh_dirty = false;
+        let v_bytes = bytemuck::cast_slice(&world.voxel_vertices_cpu);
+        let i_bytes = bytemuck::cast_slice(&world.voxel_indices_cpu);
+        if v_bytes.len() as u64 > world.voxel_vert_cap {
+            let size = (v_bytes.len() as u64).next_power_of_two().max(64 * 1024);
+            world.voxel_vertices = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("doom_voxel_vertices"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            world.voxel_vert_cap = size;
+        }
+        if i_bytes.len() as u64 > world.voxel_index_cap {
+            let size = (i_bytes.len() as u64).next_power_of_two().max(64 * 1024);
+            world.voxel_indices = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("doom_voxel_indices"),
+                size,
+                usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            world.voxel_index_cap = size;
+        }
+        if !v_bytes.is_empty() {
+            queue.write_buffer(&world.voxel_vertices, 0, v_bytes);
+        }
+        if !i_bytes.is_empty() {
+            queue.write_buffer(&world.voxel_indices, 0, i_bytes);
+        }
+    }
+
+    // Dynamic instance data for this frame
+    let total_instances: usize = scene.voxel_batches.iter().map(|b| b.instances.len()).sum();
+    world.voxel_instances_len = total_instances;
+    if total_instances > 0 {
+        let mut inst_cpu = Vec::with_capacity(total_instances);
+        for batch in &scene.voxel_batches {
+            inst_cpu.extend_from_slice(&batch.instances);
+        }
+        let inst_bytes = bytemuck::cast_slice(&inst_cpu);
+        if inst_bytes.len() as u64 > world.voxel_inst_cap {
+            let size = (inst_bytes.len() as u64).next_power_of_two().max(4 * 1024);
+            world.voxel_instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("doom_voxel_instances"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            world.voxel_inst_cap = size;
+        }
+        queue.write_buffer(&world.voxel_instances, 0, inst_bytes);
     }
 }
 
@@ -5364,7 +5636,7 @@ mod fixture_light_test;
 mod msaa_test;
 
 mod msaa;
-use msaa::{msaa_color_target, world_msaa_pipeline};
+use msaa::{msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod linear_accum_test;
