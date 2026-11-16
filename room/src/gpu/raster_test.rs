@@ -324,3 +324,388 @@ fn opposite_wall_materials_stay_on_their_own_side() {
     });
     }
 }
+
+#[test]
+fn test_weapon_render_scanline_121() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../doom1.wad");
+    if !path.exists() {
+        eprintln!("doom1.wad not found at {:?}", path);
+        return;
+    }
+    let args: Vec<_> = [
+        "room",
+        "-iwad",
+        path.to_str().unwrap(),
+        "-warp",
+        "1",
+        "1",
+        "-nosound",
+        "-nomusic",
+    ]
+    .into_iter()
+    .map(|s| std::ffi::CString::new(s).unwrap())
+    .collect();
+    let mut argv: Vec<_> = args.iter().map(|s| s.as_ptr().cast_mut()).collect();
+    argv.push(std::ptr::null_mut());
+    crate::platform::init_start_time();
+    unsafe {
+        crate::doom::d_loop::singletics = 1;
+        crate::doom::doomgeneric::doomgeneric_Create(args.len() as i32, argv.as_mut_ptr());
+        for _ in 0..35 {
+            crate::doom::d_main::doomgeneric_Tick();
+        }
+    }
+
+    let scene = unsafe { crate::hw::build_scene(true) };
+    println!("scene verts len: {}", scene.verts.len());
+    println!("scene indices len: {}", scene.indices.len());
+    println!(
+        "world_indices: {}, opaque_indices: {}",
+        scene.world_indices, scene.opaque_indices
+    );
+    let total = scene.indices.len() as u32;
+    let world_n = scene.world_indices;
+    println!("weapon indices count: {}", total - world_n);
+    for i in world_n..total {
+        let vi = scene.indices[i as usize] as usize;
+        let v = &scene.verts[vi];
+        println!(
+            "idx {}: vert {}: pos={:?}, uv={:?}, atlas={:?}, surface={}",
+            i, vi, v.pos, v.uv, v.atlas, v._pad
+        );
+    }
+    println!("view_proj: {:?}", scene.view_proj);
+    println!("view_rect: {:?}", scene.view_rect);
+
+    let weapon_atlas = scene.verts[scene.indices[world_n as usize] as usize].atlas;
+    let mut other_weapon_verts = Vec::new();
+    let num_world_verts = scene.verts.len().saturating_sub(4);
+    for (i, v) in scene.verts[..num_world_verts].iter().enumerate() {
+        if v.atlas == weapon_atlas {
+            other_weapon_verts.push(i);
+        }
+    }
+    println!("other verts with weapon atlas in 0..world_verts: {:?}", other_weapon_verts);
+
+    pollster::block_on(async {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = instance
+            .request_adapter(&Default::default())
+            .await
+            .expect("GPU adapter");
+        let (device, queue) = adapter
+            .request_device(&Default::default())
+            .await
+            .expect("GPU device");
+
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("production world shader"),
+            source: wgpu::ShaderSource::Wgsl(WORLD_SHADER.into()),
+        });
+
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("test pipeline layout"),
+            bind_group_layouts: &[Some(&device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: None,
+                entries: &[
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Uniform,
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 1,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 3,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                ],
+            }))],
+            immediate_size: 0,
+        });
+
+        let weapon_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("doom_weapon_pipeline"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_world"),
+                buffers: &[vertex_layout()],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &shader,
+                entry_point: Some("fs_weapon"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: wgpu::TextureFormat::Rgba8Unorm,
+                    blend: Some(wgpu::BlendState::REPLACE),
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                cull_mode: None,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+
+        let (atlas_size, atlas_rgba, atlas_emit) = scene.atlas.expect("scene atlas");
+        let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("atlas"),
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            atlas_tex.as_image_copy(),
+            &atlas_rgba,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas_size * 4),
+                rows_per_image: Some(atlas_size),
+            },
+            atlas_tex.size(),
+        );
+
+        let emit_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("emit"),
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::R8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            emit_tex.as_image_copy(),
+            &atlas_emit,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas_size),
+                rows_per_image: Some(atlas_size),
+            },
+            emit_tex.size(),
+        );
+
+        let light_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("light"),
+            size: wgpu::Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("doom_atlas_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            ..Default::default()
+        });
+
+        let cam = WorldUniform {
+            view_proj: scene.view_proj,
+            fill: [0.23, 1.0, 2.0, 0.0],
+        };
+        let uniform = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 80,
+            mapped_at_creation: false,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+        });
+        queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
+
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &weapon_pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&atlas_tex.create_view(&Default::default())),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&light_tex.create_view(&Default::default())),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(&emit_tex.create_view(&Default::default())),
+                },
+            ],
+        });
+
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("play_target"),
+            size: wgpu::Extent3d {
+                width: 320,
+                height: 168,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let target_view = target.create_view(&Default::default());
+
+        let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&scene.verts),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let ibuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(&scene.indices),
+            usage: wgpu::BufferUsages::INDEX,
+        });
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("test_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &target_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, 320.0, 168.0, 0.0, 1.0);
+            pass.set_vertex_buffer(0, vbuf.slice(..));
+            pass.set_index_buffer(ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_pipeline(&weapon_pipeline);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.draw_indexed(world_n..total, 0, 0..1);
+        }
+
+        // Readback
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: 320 * 4 * 168,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(320 * 4),
+                    rows_per_image: Some(168),
+                },
+            },
+            target.size(),
+        );
+        queue.submit([encoder.finish()]);
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).unwrap();
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let data = readback.slice(..).get_mapped_range();
+
+        for y in 118..126 {
+            let row = &data[y * 320 * 4..(y + 1) * 320 * 4];
+            let non_zero: Vec<(usize, [u8; 4])> = row
+                .chunks_exact(4)
+                .enumerate()
+                .filter(|(_, p)| p[3] > 0)
+                .map(|(x, p)| (x, [p[0], p[1], p[2], p[3]]))
+                .collect();
+            if y <= 121 {
+                assert_eq!(
+                    non_zero.len(),
+                    0,
+                    "Scanline {y} above weapon must not contain any ghost pixels (got {})",
+                    non_zero.len()
+                );
+            } else if y == 122 {
+                assert!(
+                    !non_zero.is_empty(),
+                    "Scanline 122 should contain the pistol sight tip"
+                );
+            }
+        }
+    });
+}
+
