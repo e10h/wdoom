@@ -4,7 +4,10 @@ fn display_light(incoming: vec3<f32>, albedo: vec3<f32>, emission: f32,
     let ceiling = max(minimum, select(1.0, maximum, maximum > 0.0));
     let limited = clamp(incoming, vec3<f32>(minimum), vec3<f32>(ceiling));
     let shaded = albedo * limited;
-    let glow = albedo * emission * emission_scale;
-    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
-    return mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
+    if (emission <= 0.0) {
+        return shaded;
+    }
+    // Retain full vibrant saturation and original texture brightness for emissive elements.
+    let emissive = albedo * emission * max(1.0, emission_scale);
+    return max(shaded, emissive);
 }

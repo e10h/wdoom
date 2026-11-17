@@ -188,7 +188,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         // empty texels; keep sector lighting there instead of painting black.
         let baked = textureLoad(light_tex, coord, 0);
         if (baked.a > 0.0) {
-            incoming = baked.rgb;
+            incoming = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
         }
     }
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
@@ -196,11 +196,11 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let albedo = color.rgb * in.tint;
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
-    let glow = albedo * emission * camera.fill.y;
-    // Same display-only self-glow as the native ray view: lift the emitter
-    // without changing its baked light or washing away its texture pattern.
-    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
-    let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
+    var radiance = shaded;
+    if (emission > 0.0) {
+        let emissive = albedo * emission * max(1.0, camera.fill.y);
+        radiance = max(shaded, emissive);
+    }
     return vec4<f32>(radiance, 1.0);
 }
 
@@ -222,9 +222,11 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = color.rgb * in.tint;
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
-    let glow = albedo * emission * camera.fill.y;
-    let hot = (shaded + glow) / (vec3<f32>(1.0) + glow);
-    let radiance = mix(shaded, hot, select(0.0, 0.5, emission > 0.0));
+    var radiance = shaded;
+    if (emission > 0.0) {
+        let emissive = albedo * emission * max(1.0, camera.fill.y);
+        radiance = max(shaded, emissive);
+    }
     return vec4<f32>(radiance, 1.0);
 }
 
@@ -663,14 +665,16 @@ fn load_light_uv(uv: vec2<f32>) -> vec3<f32> {
 // Play mode: walls and floors use their baked texel. Moving things have no
 // texel, so they take the light of the floor (or wall) under them.
 fn sample_surface_light(surf: Surf) -> vec3<f32> {
+    var baked = vec3<f32>(0.0);
     if (surf.light_uv.x >= 0.0) {
-        return load_light_uv(surf.light_uv);
+        baked = load_light_uv(surf.light_uv);
+    } else {
+        let below = trace(surf.pos + vec3<f32>(0.0, 2.0, 0.0), vec3<f32>(0.0, -1.0, 0.0));
+        if (below.hit && !below.sky && below.alpha >= 0.5 && below.light_uv.x >= 0.0) {
+            baked = load_light_uv(below.light_uv);
+        }
     }
-    let below = trace(surf.pos + vec3<f32>(0.0, 2.0, 0.0), vec3<f32>(0.0, -1.0, 0.0));
-    if (below.hit && !below.sky && below.alpha >= 0.5 && below.light_uv.x >= 0.0) {
-        return load_light_uv(below.light_uv);
-    }
-    return vec3<f32>(0.0);
+    return max(baked, vec3<f32>(surf.light * cam.fill.x * 2.0));
 }
 
 @fragment
@@ -813,7 +817,8 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
     let depth = clamp(clip.z / max(clip.w, 1e-6), 0.0, 1.0);
     if (primary.sky) { return FragOut(depth, vec4<f32>(primary.albedo, 1.0)); }
     let incoming = textureLoad(light_read, vec2<i32>(frag.xy), 0).rgb;
-    let radiance = display_light(incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
+    let base_incoming = max(incoming, vec3<f32>(primary.light * cam.fill.x * 2.0));
+    let radiance = display_light(base_incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
 "#, include_str!("gpu/light_display.wgsl"));

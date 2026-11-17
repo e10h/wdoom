@@ -46,6 +46,12 @@ fn profile(sprite: i32) -> Option<([f32; 3], f32, f32, f32)> {
         SPR_TLMP => ([0.82, 0.92, 1.0], 1536.0, 3.0, 12.0),
         SPR_TLP2 => ([0.82, 0.92, 1.0], 1024.0, 2.5, 10.0),
         SPR_FCAN => ([1.0, 0.42, 0.08], 3072.0, 6.0, 10.0),
+        SPR_BAR1 => ([0.15, 1.0, 0.20], 1280.0, 4.0, 8.0),
+        SPR_FSKU => ([1.0, 0.45, 0.10], 2048.0, 4.0, 8.0),
+        SPR_CEYE => ([0.20, 1.0, 0.30], 1280.0, 3.0, 8.0),
+        SPR_COL5 => ([0.85, 0.92, 1.0], 1536.0, 2.5, 6.0),
+        SPR_COL6 => ([1.0, 0.50, 0.15], 1536.0, 3.0, 8.0),
+        SPR_ELEC => ([0.50, 0.80, 1.0], 1536.0, 2.5, 8.0),
         _ => return None,
     })
 }
@@ -250,6 +256,12 @@ mod tests {
         assert!(profile(SPR_TRED).is_some());
         assert!(profile(SPR_TLMP).is_some());
         assert!(profile(SPR_CAND).is_some());
+        assert!(profile(SPR_BAR1).is_some());
+        assert!(profile(SPR_FSKU).is_some());
+        assert!(profile(SPR_CEYE).is_some());
+        assert!(profile(SPR_COL5).is_some());
+        assert!(profile(SPR_COL6).is_some());
+        assert!(profile(SPR_ELEC).is_some());
         assert!(profile(SPR_POSS).is_none());
         assert!(profile(SPR_BON1).is_none());
         assert_eq!(std::mem::size_of::<FixtureLight>(), 96);

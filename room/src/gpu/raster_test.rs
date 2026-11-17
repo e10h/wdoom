@@ -297,16 +297,10 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                             let px = read.slice(..).get_mapped_range()[..4].to_vec();
                             read.unmap();
                             let expected = if glow != 0 {
-                                if sample == [0, 0, 0, 0x3c00] {
-                                    if opposite_view {
-                                        [124, 0, 0, 255]
-                                    } else {
-                                        [121, 121, 121, 255]
-                                    }
-                                } else if opposite_view {
+                                if opposite_view {
                                     [255, 0, 0, 255]
                                 } else {
-                                    [188, 188, 188, 255]
+                                    [255, 255, 255, 255]
                                 }
                             } else if sample == [0, 0, 0, 0x3c00] {
                                 [0, 0, 0, 255]
