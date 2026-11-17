@@ -1444,7 +1444,7 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
 
     let (base_radius, base_color): (f32, [f32; 4]) = if th.sprite == SPR_BAR1 {
-        (28.0, [0.10, 0.95, 0.20, 0.70])
+        (64.0, [0.10, 1.0, 0.22, 0.90])
     } else if th.sprite == SPR_BEXP {
         match frame_idx {
             0 => (50.0, [1.0, 0.90, 0.25, 1.0]),
@@ -1496,7 +1496,11 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     let z0 = -fx(th.y);
 
     // 1. Floor halo
-    let h_floor = (emitter_y - floor_y).max(0.0);
+    let h_floor = if th.sprite == SPR_BAR1 || (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
+        0.0
+    } else {
+        (emitter_y - floor_y).max(0.0)
+    };
     if h_floor < base_radius {
         let atten = (1.0 - h_floor / base_radius).powi(2);
         let r_floor = (base_radius * base_radius - h_floor * h_floor).sqrt().max(base_radius * 0.45);
@@ -2697,6 +2701,7 @@ mod tests {
         assert_eq!(wall_halo.axis_v, [0.0, 1.0, 0.0]); // vertical wall quad
         assert!(floor_halo.color[1] > floor_halo.color[0]); // green dominant
         assert!(wall_halo.color[1] > wall_halo.color[0]);
+        assert!(floor_halo.radius >= 60.0);
 
         // Barrel explosion: expanding fiery yellow/orange halo on floor AND wall
         halos.clear();
