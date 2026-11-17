@@ -450,6 +450,45 @@ pub fn get_specular_sheen() -> f32 {
 }
 
 #[wasm_bindgen]
+pub fn set_ssrc(val: bool) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssrc(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn toggle_ssrc() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        gpu.as_mut().map_or(true, |g| g.toggle_ssrc())
+    })
+}
+
+#[wasm_bindgen]
+pub fn is_ssrc_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(true, |g| g.ssrc())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_ssrc_strength(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssrc_strength(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_ssrc_strength() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(0.7, |g| g.ssrc_strength())
+    })
+}
+
+#[wasm_bindgen]
 pub fn set_bounce_boost(val: f32) {
     GPU.with_borrow_mut(|gpu| {
         if let Some(gpu) = gpu.as_mut() {

@@ -65,7 +65,12 @@
     <button id="btn-bake" title="Toggle baked raytraced lightmap ([ or F6)">Bake: ON</button>
     <button id="btn-msaa" title="Toggle 4× hardware MSAA (\ or F7)">MSAA (4×): OFF</button>
     <button id="btn-smaa" title="Toggle post-pixelization SMAA (0)">SMAA: OFF</button>
+    <button id="btn-ssrc" title="Toggle Screen-Space Radiance Cascades secondary bounce & explosion glow (] or F5)">SSRC: ON</button>
     <button id="btn-clear-visible" title="Clear visible light and rebake what you see (F8)">Clear Visible</button>
+    <label style="color:#bbb;font:12px monospace;display:flex;align-items:center;gap:4px;background:rgba(20,20,20,0.7);padding:2px 8px;border-radius:4px;border:1px solid #444;" title="Screen-Space Radiance Cascades: secondary bounce & explosion glow">
+      SSRC:
+      <input id="slider-ssrc" type="range" min="0" max="2.5" step="0.1" value="0.7" style="width:64px;vertical-align:middle;">
+    </label>
     <label style="color:#bbb;font:12px monospace;display:flex;align-items:center;gap:4px;background:rgba(20,20,20,0.7);padding:2px 8px;border-radius:4px;border:1px solid #444;" title="Blend between normal Doom lighting (0%) and raytraced baked lighting (100%)">
       Blend:
       <input id="slider-blend" type="range" min="0" max="1.0" step="0.05" value="0.5" style="width:64px;vertical-align:middle;">

@@ -134,9 +134,18 @@ impl TraceUi {
                 );
                 ui.separator();
                 ui.label("Indirect Diffuse Bounces");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut controls.ssrc, "Radiance Cascades (SSRC) (] or F5)");
+                });
+                if controls.ssrc {
+                    ui.add(
+                        egui::Slider::new(&mut controls.ssrc_strength, 0.0..=2.5)
+                            .text("SSRC bounce & explosion glow"),
+                    );
+                }
                 ui.add(
                     egui::Slider::new(&mut controls.bounce_boost, 0.5..=3.0)
-                        .text("Bounce reflectance boost"),
+                        .text("Ray bounce boost"),
                 );
                 ui.separator();
                 ui.checkbox(&mut controls.smaa, "SMAA (0)");
