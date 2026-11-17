@@ -1452,8 +1452,8 @@ unsafe fn push_sprites(
             if th.sprite == SPR_BEXP {
                 light = 2.0;
             } else if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
-                // Collectible pickups and dropped items have a little emission (0.28, or 0.40 if fullbright)
-                light = if th.frame & FF_FULLBRIGHT != 0 { 1.40 } else { 1.28 };
+                // Collectible pickups and dropped items have noticeable emission (0.45, or 0.65 if fullbright)
+                light = if th.frame & FF_FULLBRIGHT != 0 { 1.65 } else { 1.45 };
             } else if th.frame & FF_FULLBRIGHT != 0 {
                 light = 1.0;
             } else if th.flags & MF_SHADOW != 0 {
