@@ -133,6 +133,16 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
         }
         return;
     }
+    if matches!(code, KeyCode::KeyO) {
+        if pressed {
+            GPU.with_borrow_mut(|gpu| {
+                if let Some(gpu) = gpu.as_mut() {
+                    gpu.toggle_ssao();
+                }
+            });
+        }
+        return;
+    }
     if matches!(code, KeyCode::Digit0 | KeyCode::Numpad0) {
         if pressed {
             GPU.with_borrow_mut(|gpu| {

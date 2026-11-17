@@ -509,6 +509,61 @@ pub fn get_ssrc_strength() -> f32 {
 }
 
 #[wasm_bindgen]
+pub fn set_ssao(val: bool) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssao(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn toggle_ssao() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        gpu.as_mut().map_or(true, |g| g.toggle_ssao())
+    })
+}
+
+#[wasm_bindgen]
+pub fn is_ssao_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(true, |g| g.ssao())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_ssao_strength(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssao_strength(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_ssao_strength() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(1.0, |g| g.ssao_strength())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_ssao_radius(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssao_radius(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_ssao_radius() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(24.0, |g| g.ssao_radius())
+    })
+}
+
+#[wasm_bindgen]
 pub fn set_bounce_boost(val: f32) {
     GPU.with_borrow_mut(|gpu| {
         if let Some(gpu) = gpu.as_mut() {

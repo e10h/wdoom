@@ -148,6 +148,21 @@ impl TraceUi {
                         .text("Ray bounce boost"),
                 );
                 ui.separator();
+                ui.label("Ambient Occlusion (Contact Shadows)");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut controls.ssao, "Ambient Occlusion (Corners) (O)");
+                });
+                if controls.ssao {
+                    ui.add(
+                        egui::Slider::new(&mut controls.ssao_strength, 0.0..=2.5)
+                            .text("Corner darkness"),
+                    );
+                    ui.add(
+                        egui::Slider::new(&mut controls.ssao_radius, 4.0..=64.0)
+                            .text("Corner radius"),
+                    );
+                }
+                ui.separator();
                 ui.checkbox(&mut controls.smaa, "SMAA (0)");
                 ui.add_enabled(controls.playing(), egui::Checkbox::new(&mut controls.neural,"Neural preview (9)"));
                 if controls.neural {

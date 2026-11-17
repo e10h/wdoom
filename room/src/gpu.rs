@@ -1175,6 +1175,12 @@ pub(crate) struct TraceSettings {
     pub(crate) ssrc: bool,
     /// Multiplier for SSRC diffuse bounce irradiance (0.0 to 3.0).
     pub(crate) ssrc_strength: f32,
+    /// Screen-Space Ambient Occlusion for natural corner and crevice contact shadows.
+    pub(crate) ssao: bool,
+    /// Multiplier for ambient occlusion corner darkening (0.0 to 2.5).
+    pub(crate) ssao_strength: f32,
+    /// Radius in Doom map units for corner contact occlusion (4.0 to 64.0).
+    pub(crate) ssao_radius: f32,
     /// Scale on diffuse indirect bounce albedo (1.0 = physical, 1.8 = real-world interior wall lift).
     pub(crate) bounce_boost: f32,
     /// Use raytraced baked lightmap when rendering Play mode.
@@ -1214,6 +1220,9 @@ impl Default for TraceSettings {
             specular_sheen: 1.0,
             ssrc: false,
             ssrc_strength: 1.0,
+            ssao: true,
+            ssao_strength: 1.0,
+            ssao_radius: 24.0,
             bounce_boost: 1.8,
             baked_light: true,
             diminish: 1.5,
@@ -1345,6 +1354,7 @@ pub struct GpuState {
     nr_live: Option<neural::Live>,
     smaa_target: Option<(smaa::SmaaTarget, (u32, u32))>,
     ssrc_pass: Option<ssrc::SsrcPass>,
+    ssao_pass: Option<ssao::SsaoPass>,
     blit: BlitGpu,
     accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1758,6 +1768,7 @@ impl GpuState {
             play_image: None,
             smaa_target: None,
             ssrc_pass: None,
+            ssao_pass: None,
             #[cfg(not(target_arch = "wasm32"))]
             nr_live: None,
             blit,
@@ -2482,6 +2493,25 @@ impl GpuState {
                     );
                 }
             }
+            if self.trace.ssao && !msaa {
+                let image = self.play_image.as_ref().expect("play image");
+                if self.ssao_pass.is_none() {
+                    self.ssao_pass = Some(ssao::SsaoPass::new(&self.device, self.config.format, rw, rh));
+                }
+                if let Some(ssao) = self.ssao_pass.as_mut() {
+                    ssao.render(
+                        &mut encoder,
+                        &self.device,
+                        &self.queue,
+                        &image.depth_view,
+                        &image.view,
+                        rw,
+                        rh,
+                        self.trace.ssao_strength,
+                        self.trace.ssao_radius,
+                    );
+                }
+            }
             {
                 let image = self.play_image.as_ref().expect("play image");
                 let world = self.world.as_ref().expect("world");
@@ -2608,6 +2638,55 @@ impl GpuState {
                 pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
                 pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
                 draw_scene(&mut pass, world, scene, false, msaa);
+            }
+
+            if self.trace.ssao && !msaa {
+                let world = self.world.as_ref().expect("world");
+                if self.ssao_pass.is_none() {
+                    self.ssao_pass = Some(ssao::SsaoPass::new(&self.device, self.config.format, self.config.width, self.config.height));
+                }
+                if let Some(ssao) = self.ssao_pass.as_mut() {
+                    ssao.render(
+                        &mut encoder,
+                        &self.device,
+                        &self.queue,
+                        &world.depth_view,
+                        post_view,
+                        self.config.width,
+                        self.config.height,
+                        self.trace.ssao_strength,
+                        self.trace.ssao_radius,
+                    );
+                }
+            }
+
+            {
+                let world = self.world.as_ref().expect("world");
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("doom_native_weapon"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: post_view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &world.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+                pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
                 draw_weapon(&mut pass, world, scene, msaa);
             }
 
@@ -3179,6 +3258,35 @@ impl GpuState {
 
     pub fn set_ssrc_strength(&mut self, val: f32) {
         self.trace.ssrc_strength = val.clamp(0.0, 3.0);
+    }
+
+    pub fn ssao(&self) -> bool {
+        self.trace.ssao
+    }
+
+    pub fn set_ssao(&mut self, val: bool) {
+        self.trace.ssao = val;
+    }
+
+    pub(crate) fn toggle_ssao(&mut self) -> bool {
+        self.trace.ssao = !self.trace.ssao;
+        self.trace.ssao
+    }
+
+    pub fn ssao_strength(&self) -> f32 {
+        self.trace.ssao_strength
+    }
+
+    pub fn set_ssao_strength(&mut self, val: f32) {
+        self.trace.ssao_strength = val.clamp(0.0, 3.0);
+    }
+
+    pub fn ssao_radius(&self) -> f32 {
+        self.trace.ssao_radius
+    }
+
+    pub fn set_ssao_radius(&mut self, val: f32) {
+        self.trace.ssao_radius = val.clamp(4.0, 64.0);
     }
 
     pub fn bounce_boost(&self) -> f32 {
@@ -6732,6 +6840,7 @@ mod msaa;
 use msaa::{halo_msaa_pipeline, msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
 
 mod ssrc;
+mod ssao;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod linear_accum_test;
