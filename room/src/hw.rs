@@ -14,8 +14,8 @@ use crate::doom::d_player::{consoleplayer, players, PspdefT, MAXPLAYERS, NUMPSPR
 use crate::doom::i_video::{hw_palette_rgb, SCREENHEIGHT, SCREENWIDTH};
 use crate::doom::info::{
     State, MF_DROPPED, MF_SPECIAL, SPR_ARM1, SPR_ARM2, SPR_BAR1, SPR_BEXP, SPR_BFE1, SPR_BFE2,
-    SPR_BFS1, SPR_BON1, SPR_BON2, SPR_MEDI, SPR_MEGA, SPR_MISL, SPR_PINV, SPR_PLSE, SPR_PLSS,
-    SPR_PSTR, SPR_SOUL, SPR_STIM,
+    SPR_BFS1, SPR_BON1, SPR_BON2, SPR_MEGA, SPR_MISL, SPR_PINV, SPR_PLSE, SPR_PLSS,
+    SPR_PSTR, SPR_SOUL,
 };
 use crate::doom::m_menu::menuactive;
 use crate::doom::p_setup::{
@@ -1486,32 +1486,8 @@ fn dedup_poly(poly: &mut Vec<[f32; 2]>) {
 
 const FF_FRAMEMASK: i32 = 0x7fff;
 
-unsafe fn push_thing_halos(th: &mobj_t, _sector: &sector_t, halos: &mut Vec<HaloInstance>) {
-    let (base_radius, base_color): (f32, [f32; 4]) = if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
-        match th.sprite {
-            SPR_ARM1 | SPR_ARM2 | SPR_SOUL | SPR_MEGA => (22.0, [0.15, 0.45, 1.0, 0.55]),
-            SPR_BON1 | SPR_BON2 | SPR_STIM | SPR_MEDI => (18.0, [0.20, 0.90, 0.30, 0.50]),
-            SPR_PINV | SPR_PSTR => (22.0, [1.0, 0.80, 0.20, 0.60]),
-            _ => (18.0, [0.60, 0.75, 0.90, 0.35]),
-        }
-    } else {
-        // Dynamic lights (barrels, explosions, missiles, plasma, BFG) are lit with 3D normal-aware light probes
-        return;
-    };
-
-    let floor_y = fx(th.floorz);
-    let x0 = fx(th.x);
-    let z0 = -fx(th.y);
-
-    halos.push(HaloInstance {
-        center: [x0, floor_y + 0.35, z0],
-        radius: base_radius,
-        axis_u: [1.0, 0.0, 0.0],
-        _pad0: 0.0,
-        axis_v: [0.0, 0.0, 1.0],
-        _pad1: 0.0,
-        color: base_color,
-    });
+unsafe fn push_thing_halos(_th: &mobj_t, _sector: &sector_t, _halos: &mut Vec<HaloInstance>) {
+    // All emissive items, barrels, and explosions are illuminated via 3D normal-aware light probes
 }
 
 pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbeBuffer) {
@@ -1549,6 +1525,40 @@ pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbe
         (110.0, [0.6, 2.5, 0.8], 0.0)
     } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
         (420.0, [1.5, 9.0, 3.0], 0.0)
+    } else if th.sprite == SPR_ARM1 {
+        // Green armor: pulses/flickers with its fullbright animation frame
+        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
+        if is_bright {
+            (56.0, [0.20, 1.50, 0.40], 0.0)
+        } else {
+            (38.0, [0.08, 0.50, 0.15], 0.0)
+        }
+    } else if th.sprite == SPR_ARM2 {
+        // Blue MegaArmor: pulses/flickers with its fullbright animation frame
+        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
+        if is_bright {
+            (56.0, [0.20, 0.60, 1.80], 0.0)
+        } else {
+            (38.0, [0.08, 0.22, 0.65], 0.0)
+        }
+    } else if th.sprite == SPR_SOUL {
+        // Soul sphere: radiant pulsing ethereal blue sphere
+        (72.0, [0.30, 0.80, 2.2], 0.0)
+    } else if th.sprite == SPR_MEGA {
+        // Megasphere: pulsing radiant golden energy
+        (75.0, [1.6, 1.3, 0.45], 0.0)
+    } else if th.sprite == SPR_PINV {
+        // Invulnerability: pulsing radiant fiery amber
+        (70.0, [1.6, 0.9, 0.25], 0.0)
+    } else if th.sprite == SPR_PSTR {
+        // Berserk: crimson adrenaline glow
+        (45.0, [1.4, 0.25, 0.15], 0.0)
+    } else if th.sprite == SPR_BON1 {
+        // Health potion: small magical blue sparkle
+        (26.0, [0.15, 0.40, 1.10], 0.0)
+    } else if th.sprite == SPR_BON2 {
+        // Armor bonus: small green sparkle
+        (26.0, [0.15, 1.10, 0.30], 0.0)
     } else {
         return;
     };
@@ -1556,8 +1566,10 @@ pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbe
     let idx = probes.meta[0] as usize;
     let emitter_y = if th.sprite == SPR_BAR1 {
         fx(th.z) + 38.0
-    } else {
+    } else if th.sprite == SPR_BEXP || th.sprite == SPR_MISL || th.sprite == SPR_PLSS || th.sprite == SPR_PLSE || th.sprite == SPR_BFS1 || th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
         fx(th.z) + 16.0
+    } else {
+        fx(th.z) + 14.0
     };
     probes.probes[idx] = LightProbe {
         pos_radius: [fx(th.x), emitter_y, -fx(th.y), radius],
@@ -2561,7 +2573,7 @@ mod tests {
     #[test]
     fn baked_halo_emission_for_barrels_and_explosions() {
         use crate::doom::c_ffi::{line_t, sector_t, vertex_t};
-        use crate::doom::info::{MF_SPECIAL, SPR_ARM1, SPR_BAR1, SPR_BEXP, SPR_MISL, SPR_PLSS};
+        use crate::doom::info::{SPR_ARM1, SPR_BAR1, SPR_BEXP, SPR_MISL, SPR_PLSS};
         use crate::doom::p_telept::mobj_t;
 
         let mut v1: vertex_t = unsafe { std::mem::zeroed() };
@@ -2590,7 +2602,9 @@ mod tests {
         th.floorz = 10 << 16;
         th.ceilingz = 128 << 16;
 
-        let mut halos = Vec::new();
+        let mut halos: Vec<super::HaloInstance> = Vec::new();
+        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
+        assert!(halos.is_empty());
 
         // Barrel idle: emits 3D light probe for normal-aware wall and ceiling shading
         th.sprite = SPR_BAR1;
@@ -2625,12 +2639,21 @@ mod tests {
         assert_eq!(probe_buf.meta[0], 1);
         assert!(probe_buf.probes[0].color_dir[2] > probe_buf.probes[0].color_dir[0]); // blue dominant
 
-        // Armor pickup: blue floor halo decal
-        halos.clear();
+        // Green armor pickup: emits green 3D light probe that flickers with fullbright frame
+        probe_buf = super::LightProbeBuffer::default();
         th.sprite = SPR_ARM1;
-        th.flags = MF_SPECIAL;
-        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert_eq!(halos.len(), 1);
-        assert!(halos[0].color[2] > halos[0].color[0]);
+        th.frame = 1 | super::FF_FULLBRIGHT;
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        let arm_bright = probe_buf.probes[0];
+        assert!(arm_bright.color_dir[1] > arm_bright.color_dir[0]); // green dominant
+        assert!(arm_bright.color_dir[1] > 1.0); // bright pulse
+
+        probe_buf = super::LightProbeBuffer::default();
+        th.frame = 0;
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        let arm_dim = probe_buf.probes[0];
+        assert!(arm_dim.color_dir[1] < arm_bright.color_dir[1]); // dimmer when not fullbright
     }
 }
