@@ -202,6 +202,7 @@ fn dedicated_source_lights_a_receiver_and_respects_occlusion() {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [40.0, 0.0, 2.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                pbr: [1.0, 1.0, 1.0, 0.0],
                 fixtures: {
                     let mut sources = crate::fixture_lights::FixtureLights::default();
                     sources.meta[0] = count + padding;

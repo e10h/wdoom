@@ -217,6 +217,7 @@ fn run_case(opposite: bool, reverse_order: bool) {
             viewport: [0.0, 0.0, 1.0, 1.0],
             light: [4.0, 1.0, 6.0, 0.0],
             fill: [0.0, 1.0, 0.0, 0.0],
+            pbr: [1.0, 1.0, 1.0, 0.0],
             fixtures: Default::default(),
         };
         queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));

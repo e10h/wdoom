@@ -103,6 +103,21 @@ impl TraceUi {
                         .text("Max light"),
                 );
                 controls.max_light = controls.max_light.max(controls.min_light);
+                ui.separator();
+                ui.label("PBR Material Tuning");
+                ui.add(
+                    egui::Slider::new(&mut controls.normal_strength, 0.0..=2.5)
+                        .text("Normal bump"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut controls.roughness_scale, 0.1..=2.0)
+                        .text("Roughness"),
+                );
+                ui.add(
+                    egui::Slider::new(&mut controls.specular_sheen, 0.0..=2.0)
+                        .text("Specular / sheen"),
+                );
+                ui.separator();
                 ui.checkbox(&mut controls.smaa, "SMAA (0)");
                 ui.add_enabled(controls.playing(), egui::Checkbox::new(&mut controls.neural,"Neural preview (9)"));
                 if controls.neural {

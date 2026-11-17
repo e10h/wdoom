@@ -108,6 +108,8 @@ struct Camera {
     view_proj: mat4x4<f32>,
     // x: minimum incoming light; y: emission strength; z: display ceiling.
     fill: vec4<f32>,
+    // x: normal strength; y: roughness scale; z: specular sheen.
+    pbr: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -214,12 +216,16 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
     var bump = 1.0;
     if (in.surface <= 1.5) {
-        let n_xy = pbr.rg * 2.0 - 1.0;
-        bump = clamp(1.0 + dot(n_xy, vec2<f32>(0.25, 0.35)), 0.6, 1.4);
+        let n_xy = (pbr.rg * 2.0 - 1.0) * camera.pbr.x;
+        bump = clamp(1.0 + dot(n_xy, vec2<f32>(0.25, 0.35)), 0.2, 2.0);
     }
+    let roughness = clamp(pbr.b * camera.pbr.y, 0.02, 1.0);
+    let metallic = pbr.a;
     let shaded = albedo * incoming * bump;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
-    let radiance = max(shaded, albedo * emission);
+    var radiance = max(shaded, albedo * emission);
+    let sheen = (1.0 - roughness) * (metallic * 0.4 + 0.1) * camera.pbr.z;
+    radiance = mix(radiance, radiance * (1.0 + sheen * 0.4) + incoming * sheen * 0.15, metallic * 0.5 + 0.1);
     return vec4<f32>(radiance, 1.0);
 }
 
@@ -367,6 +373,8 @@ struct RayCam {
     // x: minimum incoming light so dark rooms stay readable.
     // y: 1 = play mode (sample light map only). z: rows reserved under the level.
     fill: vec4<f32>,
+    // x: normal strength; y: roughness scale; z: specular sheen.
+    pbr: vec4<f32>,
     fixtures: FixtureSources,
 };
 
@@ -576,9 +584,9 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     let bitangent = cross(n, tangent);
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
-    let n_xy = pbr.rg * 2.0 - 1.0;
-    let n_z = sqrt(max(0.0, 1.0 - dot(n_xy, n_xy)));
-    let normal_ts = vec3<f32>(n_xy, n_z);
+    let n_raw = pbr.rg * 2.0 - 1.0;
+    let n_z = sqrt(max(0.0, 1.0 - dot(n_raw, n_raw)));
+    let normal_ts = normalize(vec3<f32>(n_raw * cam.pbr.x, n_z));
     let tbn = mat3x3<f32>(tangent, bitangent, n);
     var perturbed_n = normalize(tbn * normal_ts);
     if (dot(perturbed_n, dir) > 0.0) {
@@ -590,7 +598,7 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     } else {
         surf.n = n;
     }
-    surf.roughness = pbr.b;
+    surf.roughness = clamp(pbr.b * cam.pbr.y, 0.02, 1.0);
     surf.metallic = pbr.a;
     surf.albedo = tex.rgb * tint;
     surf.light = bary_mix(i0, i1, i2, 9u, b);
@@ -873,7 +881,7 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
     let NdotV = clamp(dot(primary.n, V), 0.0, 1.0);
     let F0 = mix(vec3<f32>(0.04), primary.albedo, primary.metallic);
     let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - NdotV, 5.0);
-    let sheen = fresnel * (1.0 - primary.roughness);
+    let sheen = fresnel * (1.0 - primary.roughness) * cam.pbr.z;
     radiance = mix(radiance, radiance * (vec3<f32>(1.0) + sheen * 0.35) + base_incoming * sheen * 0.1, primary.metallic * 0.5 + 0.15);
 
     return FragOut(depth, vec4<f32>(radiance, 1.0));
@@ -967,6 +975,12 @@ pub(crate) struct TraceSettings {
     pub(crate) neural_split_x: f32,
     pub(crate) neural_fsr: bool,
     pub(crate) neural_sharpness: f32,
+    /// Normal map perturbation multiplier (0.0 = flat, 1.0 = default, up to 2.5).
+    pub(crate) normal_strength: f32,
+    /// Roughness multiplier (0.1 = high gloss/mirror, 1.0 = authored, 2.0 = matte).
+    pub(crate) roughness_scale: f32,
+    /// Specular sheen and metallic luster intensity (0.0 = off, 1.0 = default).
+    pub(crate) specular_sheen: f32,
 }
 
 impl Default for TraceSettings {
@@ -991,6 +1005,9 @@ impl Default for TraceSettings {
             neural_split_x: 0.5,
             neural_fsr: true,
             neural_sharpness: 0.8,
+            normal_strength: 1.0,
+            roughness_scale: 1.0,
+            specular_sheen: 1.0,
         }
     }
 }
@@ -1755,6 +1772,7 @@ impl GpuState {
             let cam = WorldUniform {
                 view_proj: scene.view_proj,
                 fill: [self.trace.min_light, self.trace.emission, self.trace.max_light, 0.0],
+                pbr: [self.trace.normal_strength, self.trace.roughness_scale, self.trace.specular_sheen, 0.0],
             };
             self.queue
                 .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
@@ -2783,6 +2801,30 @@ impl GpuState {
         log::info!("clearing visible lightmap texels for selective rebake");
     }
 
+    pub fn normal_strength(&self) -> f32 {
+        self.trace.normal_strength
+    }
+
+    pub fn set_normal_strength(&mut self, val: f32) {
+        self.trace.normal_strength = val.clamp(0.0, 5.0);
+    }
+
+    pub fn roughness_scale(&self) -> f32 {
+        self.trace.roughness_scale
+    }
+
+    pub fn set_roughness_scale(&mut self, val: f32) {
+        self.trace.roughness_scale = val.clamp(0.01, 5.0);
+    }
+
+    pub fn specular_sheen(&self) -> f32 {
+        self.trace.specular_sheen
+    }
+
+    pub fn set_specular_sheen(&mut self, val: f32) {
+        self.trace.specular_sheen = val.clamp(0.0, 5.0);
+    }
+
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2915,6 +2957,12 @@ impl GpuState {
                 if self.trace.playing() { 1.0 } else { 0.0 },
                 crate::hw::VOXEL_LIGHT_ROWS.max(0) as f32,
                 self.trace.max_light,
+            ],
+            pbr: [
+                self.trace.normal_strength,
+                self.trace.roughness_scale,
+                self.trace.specular_sheen,
+                0.0,
             ],
             // Keep the original texture-emission path for ceilings. Dedicated
             // sources are only for standing lamps/torches; their records leave
@@ -3445,6 +3493,7 @@ const VERTEX_ATTRS: [wgpu::VertexAttribute; 7] = [
 struct WorldUniform {
     view_proj: [[f32; 4]; 4],
     fill: [f32; 4],
+    pbr: [f32; 4],
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -4097,6 +4146,8 @@ struct RayUniform {
     light: [f32; 4],
     /// x: minimum display light.
     fill: [f32; 4],
+    /// x: normal strength, y: roughness scale, z: specular sheen.
+    pbr: [f32; 4],
     fixtures: crate::fixture_lights::FixtureLights,
 }
 
@@ -5147,6 +5198,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                pbr: [1.0, 1.0, 1.0, 0.0],
                 fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
@@ -5444,6 +5496,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 1.0, 6.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                pbr: [1.0, 1.0, 1.0, 0.0],
                 fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));
@@ -5748,6 +5801,7 @@ mod ray_test {
                 viewport: [0.0, 0.0, 1.0, 1.0],
                 light: [4.0, 0.0, 1.0, 0.0],
                 fill: [0.0, 0.0, 0.0, 0.0],
+                pbr: [1.0, 1.0, 1.0, 0.0],
                 fixtures: Default::default(),
             };
             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&cam));

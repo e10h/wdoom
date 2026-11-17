@@ -93,7 +93,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
         let sampler = device.create_sampler(&Default::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 80,
+            size: std::mem::size_of::<WorldUniform>() as u64,
             mapped_at_creation: false,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -203,6 +203,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                     ],
                                 ],
                                 fill: [0.0, 40.0, 1.0, 0.0],
+                                pbr: [1.0, 1.0, 1.0, 0.0],
                             };
                             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&camera));
                             let mut vertices = Vec::new();
@@ -601,10 +602,11 @@ fn test_weapon_render_scanline_121() {
         let cam = WorldUniform {
             view_proj: scene.view_proj,
             fill: [0.23, 1.0, 2.0, 0.0],
+            pbr: [1.0, 1.0, 1.0, 0.0],
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
-            size: 80,
+            size: std::mem::size_of::<WorldUniform>() as u64,
             mapped_at_creation: false,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
