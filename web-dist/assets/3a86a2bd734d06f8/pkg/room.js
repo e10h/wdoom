@@ -18,6 +18,14 @@ export function get_bounce_boost() {
 /**
  * @returns {number}
  */
+export function get_diminish() {
+    const ret = wasm.get_diminish();
+    return ret;
+}
+
+/**
+ * @returns {number}
+ */
 export function get_normal_strength() {
     const ret = wasm.get_normal_strength();
     return ret;
@@ -77,6 +85,13 @@ export function set_baked_light(val) {
  */
 export function set_bounce_boost(val) {
     wasm.set_bounce_boost(val);
+}
+
+/**
+ * @param {number} val
+ */
+export function set_diminish(val) {
+    wasm.set_diminish(val);
 }
 
 /**

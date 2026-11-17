@@ -1,10 +1,10 @@
 {
-  "version": "e6a3f5b66973b842",
-  "sourceSha256": "7246d99c9dadf7e222843cf05c91a02edd8e3ea2c1a83061530fd7f4a35e374c",
+  "version": "3a86a2bd734d06f8",
+  "sourceSha256": "3d515686aed3f358f58420b578f4bab247268e96cb796b28963edd47bdba2c50",
   "bakes": {
     "light_e1m1_418868fd2c508de1.rmlt": {
-      "nativeSha256": "16128603ece95c372a79bcb5b202d162c326040a58e2808e1f762e7e176dc754",
-      "nativeBytes": 53364644
+      "nativeSha256": "26ffa8bf76a32144b2ed49a3c00b7d0dd5175643f7e9dd7cea3389f1c757abbd",
+      "nativeBytes": 54253700
     },
     "light_e1m2_d4897360a36456a0.rmlt": {
       "nativeSha256": "045db2920bdce12c650151ee2e88bbd30a70195c95ce863e3169c1d5fe9763db",
@@ -24,11 +24,11 @@
     "LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
     "LICENSE-DOOM1": "3b1e13d2554dca18d35f8dfc13c95f7421af17ff2163355892f08e20ac472cc3",
     "NOTICE.md": "f081f6f2158d7778cbc6025a5379688abe6a3e88aedc6cdb200c3b32c90c6630",
-    "assets/e6a3f5b66973b842/index.js": "32b774bfe16212709d8ad9688269f6dd3abb93ba02ab8d159d4b723aadd8e75b",
-    "assets/e6a3f5b66973b842/pkg/room.js": "7182294c63f417346b2ee733889f144be2cca961e265d7e7fceb5cf8efa622d3",
-    "assets/e6a3f5b66973b842/pkg/room_bg.wasm": "3ed97f0ac77e325728393dac2c7590425080593baab6c86e9d3c4bd26eb81654",
-    "index.html": "19f725ccff3ed61186119da64f42408f6d6c7a5613e863a817af62047562e975",
-    "light/light_e1m1_418868fd2c508de1.rmlt": "6b0df9d970ab42f9511c7cba6d496c3c31f66b5d65ae3b1a410ade52815d9e78",
+    "assets/3a86a2bd734d06f8/index.js": "ae45cf032061403d7a2a9c4aee2b773d709617ce1933cc876e27fcc03190bf41",
+    "assets/3a86a2bd734d06f8/pkg/room.js": "1cabdf531a6e3df545fa30fe122be59579948e342cf7983f03f1ded01cc3038f",
+    "assets/3a86a2bd734d06f8/pkg/room_bg.wasm": "e1b6d5c9a50da8240083a66fd9b1967a37ba96931baabb4d64013c22f03202e2",
+    "index.html": "af88eb2ed63376f4cb08681bed1ad9563ee9da4cc788da0840844f776dd1f570",
+    "light/light_e1m1_418868fd2c508de1.rmlt": "ce95107f28a974025e00a8dd00da1140cd75c04c4e55a8113817d34469a9c293",
     "light/light_e1m2_d4897360a36456a0.rmlt": "e0b624cc7adab23a0a511e0f85a6499fe2e0dea0bbc829caab1611838c977b9e",
     "light/light_e1m3_e7ceee46f084e500.rmlt": "23e27370240b164b7d2259d9fefa76482dd7fe09a333be055f2201f5954a9f21",
     "light/light_e1m5_afeecbbab6c8cd65.rmlt": "7a397146f8657e01d155efc0ee9a0a4659095fe9e885871285dc6f0d1c079747",

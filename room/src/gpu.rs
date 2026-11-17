@@ -106,9 +106,9 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const WORLD_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
-    // x: minimum incoming light; y: emission strength; z: display ceiling.
+    // x: minimum incoming light; y: emission strength; z: display ceiling; w: bypass bake (1.0 = bypass, 0.0 = use bake).
     fill: vec4<f32>,
-    // x: normal strength; y: roughness scale; z: specular sheen.
+    // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
 };
 
@@ -138,6 +138,7 @@ struct VertexOutput {
     @location(4) light_uv: vec2<f32>,
     @location(5) @interpolate(flat) surface: f32,
     @location(6) world_pos: vec3<f32>,
+    @location(7) view_dist: f32,
 };
 
 @vertex
@@ -151,7 +152,25 @@ fn vs_world(in: VertexInput) -> VertexOutput {
     out.light_uv = in.light_uv;
     out.surface = in.surface;
     out.world_pos = in.pos;
+    out.view_dist = out.clip_position.w;
     return out;
+}
+
+fn doom_diminish(light_in: vec3<f32>, dist: f32, strength: f32, min_floor: f32) -> vec3<f32> {
+    if (strength <= 0.001) {
+        return light_in;
+    }
+    let lum = dot(light_in, vec3<f32>(0.299, 0.587, 0.114));
+    if (lum >= 1.0) {
+        return light_in;
+    }
+    let startmap = (1.0 - clamp(lum, 0.0, 1.0)) * 60.0;
+    let dist_scale = (1280.0 * strength) / max(dist, 16.0);
+    let colormap_index = clamp(startmap - dist_scale, 0.0, 31.0);
+    let factor = 1.0 - colormap_index / 31.0;
+    let diminished = light_in * (factor / max(lum, 0.04));
+    let result = max(diminished, vec3<f32>(min_floor * 0.5));
+    return mix(light_in, result, clamp(strength, 0.0, 1.0));
 }
 
 fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
@@ -211,6 +230,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     }
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    incoming = doom_diminish(incoming, in.view_dist, camera.pbr.w, camera.fill.x);
     let albedo = color.rgb * in.tint;
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
@@ -279,7 +299,8 @@ fn vs_voxel(v: VoxelVertexInput, inst: VoxelInstanceInput) -> VoxelVertexOutput 
     out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     let incoming = clamp(inst.light, camera.fill.x, ceiling);
-    out.color = v.tint * incoming;
+    let diminished = doom_diminish(vec3<f32>(incoming), out.clip_position.w, camera.pbr.w, camera.fill.x);
+    out.color = v.tint * diminished;
     return out;
 }
 
@@ -1017,6 +1038,8 @@ pub(crate) struct TraceSettings {
     pub(crate) bounce_boost: f32,
     /// Use raytraced baked lightmap when rendering Play mode.
     pub(crate) baked_light: bool,
+    /// OG Doom distance light diminishing (0.0 = flat/disabled, 1.0 = classic hyperbolic falloff).
+    pub(crate) diminish: f32,
 }
 
 impl Default for TraceSettings {
@@ -1046,6 +1069,7 @@ impl Default for TraceSettings {
             specular_sheen: 1.0,
             bounce_boost: 1.8,
             baked_light: true,
+            diminish: 1.0,
         }
     }
 }
@@ -1815,7 +1839,12 @@ impl GpuState {
                     self.trace.max_light,
                     if self.trace.baked_light { 0.0 } else { 1.0 },
                 ],
-                pbr: [self.trace.normal_strength, self.trace.roughness_scale, self.trace.specular_sheen, 0.0],
+                pbr: [
+                    self.trace.normal_strength,
+                    self.trace.roughness_scale,
+                    self.trace.specular_sheen,
+                    self.trace.diminish,
+                ],
             };
             self.queue
                 .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
@@ -2887,6 +2916,14 @@ impl GpuState {
     pub(crate) fn toggle_baked_light(&mut self) -> bool {
         self.trace.baked_light = !self.trace.baked_light;
         self.trace.baked_light
+    }
+
+    pub fn diminish(&self) -> f32 {
+        self.trace.diminish
+    }
+
+    pub fn set_diminish(&mut self, val: f32) {
+        self.trace.diminish = val.clamp(0.0, 2.0);
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {

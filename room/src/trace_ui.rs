@@ -96,6 +96,10 @@ impl TraceUi {
                 });
                 if controls.playing() {
                     ui.checkbox(&mut controls.baked_light, "Baked light ([ or F6)");
+                    ui.add(
+                        egui::Slider::new(&mut controls.diminish, 0.0..=1.5)
+                            .text("OG Doom diminishing"),
+                    );
                 }
                 ui.add(
                     egui::Slider::new(&mut controls.min_light, 0.0..=1.0)
