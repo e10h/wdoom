@@ -218,22 +218,22 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 let ndotl = max(dot(n0, L), 0.0);
 
                 if (is_explosion) {
-                    // Explosions radiate light up to ~180 units in 3D:
-                    if (dist_3d < 180.0 && ndotl > 0.0) {
+                    // Explosions radiate light up to ~220 units in 3D:
+                    if (dist_3d < 220.0 && ndotl > 0.0) {
                         let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
-                        let lum_norm = clamp((lum - 0.40) / 0.60, 0.0, 1.0);
-                        let emit_boost = 3.0 + pow(lum_norm, 1.8) * 10.0;
-                        let r_norm = dist_3d / 180.0;
+                        let lum_norm = clamp((lum - 0.35) / 0.65, 0.0, 1.0);
+                        let emit_boost = 24.0 + pow(lum_norm, 1.5) * 60.0;
+                        let r_norm = dist_3d / 220.0;
                         let falloff = (1.0 - r_norm) * (1.0 - r_norm);
                         ray_radiance = hit_color * (emit_boost * falloff * ndotl * edge_fade);
                         hit_found = true;
                         break;
                     }
                 } else if (is_drop) {
-                    // Collectible drops: tight 3D radius (42 units) to pool on floor and adjacent walls
-                    if (dist_3d < 42.0 && ndotl > 0.0) {
-                        let emit_boost = 5.0;
-                        let r_norm = dist_3d / 42.0;
+                    // Collectible drops: radiant glow on floor and surrounding geometry up to 60 units:
+                    if (dist_3d < 60.0 && ndotl > 0.0) {
+                        let emit_boost = 32.0;
+                        let r_norm = dist_3d / 60.0;
                         let falloff = (1.0 - r_norm) * (1.0 - r_norm);
                         ray_radiance = hit_color * (emit_boost * falloff * ndotl * edge_fade);
                         hit_found = true;
@@ -242,9 +242,9 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 } else {
                     // Subtle contact diffuse bounce:
                     let thickness = max(z0 * 0.12, 16.0);
-                    if (depth_diff > 2.0 && depth_diff < thickness && dist_3d < 40.0 && ndotl > 0.0) {
-                        let falloff = 1.0 / (1.0 + dist_3d * 0.05);
-                        ray_radiance = hit_color * (0.10 * falloff * ndotl * edge_fade);
+                    if (depth_diff > 2.0 && depth_diff < thickness && dist_3d < 45.0 && ndotl > 0.0) {
+                        let falloff = 1.0 / (1.0 + dist_3d * 0.04);
+                        ray_radiance = hit_color * (0.45 * falloff * ndotl * edge_fade);
                         hit_found = true;
                         break;
                     }

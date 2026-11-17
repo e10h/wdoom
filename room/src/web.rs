@@ -484,7 +484,7 @@ pub fn set_ssrc_strength(val: f32) {
 #[wasm_bindgen]
 pub fn get_ssrc_strength() -> f32 {
     GPU.with_borrow(|gpu| {
-        gpu.as_ref().map_or(0.7, |g| g.ssrc_strength())
+        gpu.as_ref().map_or(1.0, |g| g.ssrc_strength())
     })
 }
 

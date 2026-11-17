@@ -1148,7 +1148,7 @@ impl Default for TraceSettings {
             roughness_scale: 1.0,
             specular_sheen: 1.0,
             ssrc: true,
-            ssrc_strength: 0.7,
+            ssrc_strength: 1.0,
             bounce_boost: 1.8,
             baked_light: true,
             diminish: 1.5,
