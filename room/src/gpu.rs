@@ -104,14 +104,22 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 /// Rasterized level mesh. Play mode draws this with the light map; bake mode
 /// uses the ray pass instead when hardware ray queries are available.
 const WORLD_SHADER: &str = r#"
+struct LightProbe {
+    pos_radius: vec4<f32>,
+    color_dir: vec4<f32>,
+};
+
 struct Camera {
     view_proj: mat4x4<f32>,
+    eye: vec4<f32>,
     // x: minimum incoming light; y: bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked); z: display ceiling; w: bypass bake (1.0 = bypass, 0.0 = use bake).
     fill: vec4<f32>,
     // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
     // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked).
     extra: vec4<f32>,
+    probe_meta: vec4<u32>,
+    probes: array<LightProbe, 16>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -188,6 +196,34 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
     return mat3x3<f32>(T * invmax, B * invmax, N);
 }
 
+fn evaluate_light_probes(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
+    var irr = vec3<f32>(0.0);
+    let count = min(camera.probe_meta.x, 16u);
+    for (var i = 0u; i < count; i = i + 1u) {
+        let probe = camera.probes[i];
+        let delta = probe.pos_radius.xyz - world_pos;
+        let dist2 = dot(delta, delta);
+        let radius = probe.pos_radius.w;
+        if (dist2 < radius * radius && dist2 > 0.0001) {
+            let dist = sqrt(dist2);
+            let L = delta / dist;
+            var ndl = max(dot(n, L), 0.0);
+
+            let dir_bias = probe.color_dir.w;
+            if (dir_bias > 0.5) {
+                // Light from open barrel emits upward and outward into upper hemisphere (+Y)
+                let emit_up = -L.y;
+                let cone = clamp(emit_up * 1.5 + 0.1, 0.0, 1.0);
+                ndl = ndl * cone;
+            }
+
+            let atten = clamp(1.0 - dist / radius, 0.0, 1.0);
+            irr = irr + probe.color_dir.rgb * (ndl * atten * atten);
+        }
+    }
+    return irr;
+}
+
 @fragment
 fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0) vec4<f32> {
     // Wall quads face their Doom sector clockwise. The opposite sidedef
@@ -245,6 +281,12 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     let obj_ceiling = select(1.0, max(ceiling, actual_light), in.surface <= 1.5 || is_explosion);
     incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
+    var geom_n = normalize(cross(dpdx(in.world_pos), dpdy(in.world_pos)));
+    let view_dir = normalize(camera.eye.xyz - in.world_pos);
+    if (dot(geom_n, view_dir) < 0.0) {
+        geom_n = -geom_n;
+    }
+    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n);
     let albedo = color.rgb * in.tint;
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
@@ -379,6 +421,7 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     if (is_drop) {
         incoming = max(incoming, vec3<f32>(0.65));
     }
+    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n);
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     let lit_color = in.color * incoming;
     let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
@@ -1932,6 +1975,7 @@ impl GpuState {
             upload_mesh(world, &self.device, &self.queue, scene);
             let cam = WorldUniform {
                 view_proj: scene.view_proj,
+                eye: [scene.eye[0], scene.eye[1], scene.eye[2], 1.0],
                 fill: [
                     self.trace.min_light,
                     self.trace.light_blend,
@@ -1950,6 +1994,8 @@ impl GpuState {
                     0.0,
                     0.0,
                 ],
+                probe_meta: scene.light_probes.meta,
+                probes: scene.light_probes.probes,
             };
             self.queue
                 .write_buffer(&world.uniform, 0, bytemuck::bytes_of(&cam));
@@ -3566,7 +3612,7 @@ impl GpuState {
             });
         let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("doom_camera"),
-            size: 256,
+            size: std::mem::size_of::<WorldUniform>() as u64,
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -3951,11 +3997,14 @@ const VERTEX_ATTRS: [wgpu::VertexAttribute; 7] = [
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
-struct WorldUniform {
-    view_proj: [[f32; 4]; 4],
-    fill: [f32; 4],
-    pbr: [f32; 4],
-    extra: [f32; 4],
+pub(crate) struct WorldUniform {
+    pub view_proj: [[f32; 4]; 4],
+    pub eye: [f32; 4],
+    pub fill: [f32; 4],
+    pub pbr: [f32; 4],
+    pub extra: [f32; 4],
+    pub probe_meta: [u32; 4],
+    pub probes: [crate::hw::LightProbe; crate::hw::MAX_LIGHT_PROBES],
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {

@@ -122,6 +122,36 @@ pub struct HaloInstance {
     pub color: [f32; 4],
 }
 
+pub const MAX_LIGHT_PROBES: usize = 16;
+
+/// A dynamic 3D light probe emitting directional radiance into the scene.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightProbe {
+    /// World position (xyz) and effective radius (w) in Doom map units.
+    pub pos_radius: [f32; 4],
+    /// Linear RGB intensity (xyz) and directional cone mask (w).
+    /// w == 0.0: omnidirectional (explosions, torches, fireballs)
+    /// w == 1.0: upward directional (open toxic barrels emitting from top rim)
+    pub color_dir: [f32; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Debug, bytemuck::Pod, bytemuck::Zeroable)]
+pub struct LightProbeBuffer {
+    pub meta: [u32; 4],
+    pub probes: [LightProbe; MAX_LIGHT_PROBES],
+}
+
+impl Default for LightProbeBuffer {
+    fn default() -> Self {
+        Self {
+            meta: [0; 4],
+            probes: [LightProbe::default(); MAX_LIGHT_PROBES],
+        }
+    }
+}
+
 /// One frame of world geometry plus the camera and the HUD hole.
 pub struct Scene {
     pub verts: Vec<Vertex>,
@@ -137,6 +167,8 @@ pub struct Scene {
     pub voxel_batches: Vec<VoxelBatch>,
     /// Ground halo decals (baked circular falloffs on the floor).
     pub halos: Vec<HaloInstance>,
+    /// Dynamic 3D light probes (directional irradiance for barrels, explosions, etc.).
+    pub light_probes: LightProbeBuffer,
     pub view_proj: [[f32; 4]; 4],
     /// Camera basis for primary rays. `right`, `up`, and `forward` are unit
     /// vectors. `aspect` is the projection aspect used by [`view_proj`].
@@ -183,6 +215,7 @@ struct Scratch {
     indices: Vec<u32>,
     voxel_batches: Vec<VoxelBatch>,
     halos: Vec<HaloInstance>,
+    light_probes: LightProbeBuffer,
     atlas: Option<Atlas>,
     /// Closed floor outlines in Doom map units, one per subsector.
     /// Rebuilt when a new map is loaded. Segs alone do not form these
@@ -197,6 +230,13 @@ static mut SCRATCH: Scratch = Scratch {
     indices: Vec::new(),
     voxel_batches: Vec::new(),
     halos: Vec::new(),
+    light_probes: LightProbeBuffer {
+        meta: [0; 4],
+        probes: [LightProbe {
+            pos_radius: [0.0; 4],
+            color_dir: [0.0; 4],
+        }; MAX_LIGHT_PROBES],
+    },
     atlas: None,
     flats: Vec::new(),
     flats_key: 0,
@@ -230,6 +270,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     scratch.indices.clear();
     scratch.voxel_batches.clear();
     scratch.halos.clear();
+    scratch.light_probes = LightProbeBuffer::default();
 
     let eye = [fx(viewx), fx(viewz), -fx(viewy)];
     let ang = viewangle as f32 * std::f32::consts::TAU / 4294967296.0;
@@ -254,6 +295,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
         scratch.indices.clear();
         scratch.voxel_batches.clear();
         scratch.halos.clear();
+        scratch.light_probes = LightProbeBuffer::default();
         light_reuse();
         (opaque_indices, world_indices) =
             fill_scene(scratch, eye, ang, right, forward, cam_up, actors);
@@ -281,6 +323,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     let indices = std::mem::take(&mut scratch.indices);
     let voxel_batches = std::mem::take(&mut scratch.voxel_batches);
     let halos = std::mem::take(&mut scratch.halos);
+    let light_probes = scratch.light_probes;
     Scene {
         verts,
         indices,
@@ -288,6 +331,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
         world_indices,
         voxel_batches,
         halos,
+        light_probes,
         view_proj,
         eye,
         right,
@@ -346,6 +390,7 @@ unsafe fn fill_scene(
                 &mut scratch.indices,
                 &mut scratch.voxel_batches,
                 &mut scratch.halos,
+                &mut scratch.light_probes,
                 atlas,
                 right,
                 true,
@@ -362,6 +407,7 @@ unsafe fn fill_scene(
                 &mut scratch.indices,
                 &mut scratch.voxel_batches,
                 &mut scratch.halos,
+                &mut scratch.light_probes,
                 atlas,
                 right,
                 false,
@@ -1444,7 +1490,8 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
 
     let (base_radius, base_color): (f32, [f32; 4]) = if th.sprite == SPR_BAR1 {
-        (52.0, [0.06, 0.42, 0.12, 0.40])
+        // Toxic barrels are lit with normal-aware 3D light probes
+        return;
     } else if th.sprite == SPR_BEXP {
         match frame_idx {
             0 => (50.0, [1.0, 0.90, 0.25, 1.0]),
@@ -1684,11 +1731,64 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     }
 }
 
+pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbeBuffer) {
+    if probes.meta[0] as usize >= MAX_LIGHT_PROBES {
+        return;
+    }
+    let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
+    let (radius, color, dir_bias): (f32, [f32; 3], f32) = if th.sprite == SPR_BAR1 {
+        // Toxic barrel: radioactive green radiance emitting upward and outward from top rim
+        (85.0, [0.08, 0.70, 0.16], 1.0)
+    } else if th.sprite == SPR_BEXP {
+        // Barrel explosion: expanding fiery blast
+        match frame_idx {
+            0 => (80.0, [1.0, 0.90, 0.25], 0.0),
+            1 => (120.0, [1.0, 0.75, 0.15], 0.0),
+            2 => (160.0, [1.0, 0.55, 0.10], 0.0),
+            3 => (180.0, [0.85, 0.35, 0.05], 0.0),
+            _ => (190.0, [0.50, 0.20, 0.05], 0.0),
+        }
+    } else if th.sprite == SPR_MISL {
+        if frame_idx == 0 {
+            (32.0, [1.0, 0.70, 0.20], 0.0)
+        } else {
+            match frame_idx {
+                1 => (90.0, [1.0, 0.85, 0.25], 0.0),
+                2 => (140.0, [1.0, 0.55, 0.10], 0.0),
+                _ => (160.0, [0.70, 0.30, 0.05], 0.0),
+            }
+        }
+    } else if th.sprite == SPR_PLSS {
+        (35.0, [0.20, 0.50, 1.0], 0.0)
+    } else if th.sprite == SPR_PLSE {
+        (70.0, [0.30, 0.70, 1.0], 0.0)
+    } else if th.sprite == SPR_BFS1 {
+        (80.0, [0.30, 1.0, 0.40], 0.0)
+    } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
+        (220.0, [0.20, 1.0, 0.30], 0.0)
+    } else {
+        return;
+    };
+
+    let idx = probes.meta[0] as usize;
+    let emitter_y = if th.sprite == SPR_BAR1 {
+        fx(th.z) + 38.0
+    } else {
+        fx(th.z) + 16.0
+    };
+    probes.probes[idx] = LightProbe {
+        pos_radius: [fx(th.x), emitter_y, -fx(th.y), radius],
+        color_dir: [color[0], color[1], color[2], dir_bias],
+    };
+    probes.meta[0] += 1;
+}
+
 unsafe fn push_sprites(
     verts: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
     voxel_batches: &mut Vec<VoxelBatch>,
     halos: &mut Vec<HaloInstance>,
+    probes: &mut LightProbeBuffer,
     atlas: &Atlas,
     right: [f32; 3],
     voxels: bool,
@@ -1752,6 +1852,7 @@ unsafe fn push_sprites(
             };
             if voxels {
                 push_thing_halos(th, sector, halos);
+                push_thing_light_probe(th, probes);
             }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
@@ -2708,20 +2809,14 @@ mod tests {
 
         let mut halos = Vec::new();
 
-        // Barrel idle: green ceiling halo + green wall halo (no floor halo, goo is at top facing up!)
+        // Barrel idle: emits 3D light probe for normal-aware wall and ceiling shading
         th.sprite = SPR_BAR1;
-        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert!(halos.len() >= 2, "must emit both ceiling and wall halos for barrel near wall");
-        // Verify no floor halo was emitted for barrel
-        assert!(halos.iter().all(|h| (h.center[1] - (10.0 + 0.35)).abs() > 0.01));
-        // Verify ceiling halo exists
-        let ceiling_halo = halos.iter().find(|h| (h.center[1] - (128.0 - 0.35)).abs() < 0.01).expect("barrel must illuminate ceiling");
-        assert_eq!(ceiling_halo.axis_v, [0.0, 0.0, 1.0]);
-        assert!(ceiling_halo.color[1] > ceiling_halo.color[0]);
-        assert!(ceiling_halo.radius >= 40.0);
-        // Verify wall halo exists
-        let wall_halo = halos.iter().find(|h| h.axis_v == [0.0, 1.0, 0.0]).expect("barrel must illuminate wall");
-        assert!(wall_halo.color[1] > wall_halo.color[0]);
+        let mut probe_buf = super::LightProbeBuffer::default();
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        let p = probe_buf.probes[0];
+        assert!(p.color_dir[1] > p.color_dir[0]); // green dominant
+        assert_eq!(p.color_dir[3], 1.0); // upward directional emission
 
         // Barrel explosion: expanding fiery yellow/orange halo on floor AND wall
         halos.clear();

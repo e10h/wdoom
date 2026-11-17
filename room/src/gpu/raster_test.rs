@@ -203,8 +203,11 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                     ],
                                 ],
                                 fill: [0.0, 40.0, 1.0, 0.0],
+                                eye: [0.0; 4],
                                 pbr: [1.0, 1.0, 1.0, 0.0],
                                 extra: [1.0, 0.0, 0.0, 0.0],
+                                probe_meta: [0; 4],
+                                probes: [crate::hw::LightProbe::default(); crate::hw::MAX_LIGHT_PROBES],
                             };
                             queue.write_buffer(&uniform, 0, bytemuck::bytes_of(&camera));
                             let mut vertices = Vec::new();
@@ -602,9 +605,12 @@ fn test_weapon_render_scanline_121() {
 
         let cam = WorldUniform {
             view_proj: scene.view_proj,
+            eye: [scene.eye[0], scene.eye[1], scene.eye[2], 1.0],
             fill: [0.23, 1.0, 2.0, 0.0],
             pbr: [1.0, 1.0, 1.0, 0.0],
             extra: [1.0, 0.0, 0.0, 0.0],
+            probe_meta: [0; 4],
+            probes: [crate::hw::LightProbe::default(); crate::hw::MAX_LIGHT_PROBES],
         };
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
