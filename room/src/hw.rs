@@ -1491,36 +1491,51 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
 
     let floor_y = fx(th.floorz);
     let ceil_y = fx(th.ceilingz);
-    let emitter_y = fx(th.z) + 16.0;
+    let emitter_y = if th.sprite == SPR_BAR1 {
+        fx(th.z) + 38.0
+    } else {
+        fx(th.z) + 16.0
+    };
     let x0 = fx(th.x);
     let z0 = -fx(th.y);
 
-    // 1. Floor halo
-    let h_floor = if th.sprite == SPR_BAR1 || (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
-        0.0
-    } else {
-        (emitter_y - floor_y).max(0.0)
-    };
-    if h_floor < base_radius {
-        let atten = (1.0 - h_floor / base_radius).powi(2);
-        let r_floor = (base_radius * base_radius - h_floor * h_floor).sqrt().max(base_radius * 0.45);
-        halos.push(HaloInstance {
-            center: [x0, floor_y + 0.35, z0],
-            radius: r_floor,
-            axis_u: [1.0, 0.0, 0.0],
-            _pad0: 0.0,
-            axis_v: [0.0, 0.0, 1.0],
-            _pad1: 0.0,
-            color: [base_color[0], base_color[1], base_color[2], base_color[3] * atten],
-        });
+    // 1. Floor halo (barrels have glowing goo at the open top, so the metal drum blocks downward light onto the floor)
+    if th.sprite != SPR_BAR1 {
+        let h_floor = if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
+            0.0
+        } else {
+            (emitter_y - floor_y).max(0.0)
+        };
+        if h_floor < base_radius {
+            let atten = (1.0 - h_floor / base_radius).powi(2);
+            let r_floor = (base_radius * base_radius - h_floor * h_floor).sqrt().max(base_radius * 0.45);
+            halos.push(HaloInstance {
+                center: [x0, floor_y + 0.35, z0],
+                radius: r_floor,
+                axis_u: [1.0, 0.0, 0.0],
+                _pad0: 0.0,
+                axis_v: [0.0, 0.0, 1.0],
+                _pad1: 0.0,
+                color: [base_color[0], base_color[1], base_color[2], base_color[3] * atten],
+            });
+        }
     }
 
-    // 2. Ceiling halo (for larger explosions)
-    if base_radius >= 40.0 {
+    // 2. Ceiling halo (the open barrel top emits upwards to the ceiling, as do larger explosions)
+    let (ceil_reach, ceil_linear) = if th.sprite == SPR_BAR1 {
+        (130.0, true)
+    } else {
+        (base_radius, false)
+    };
+    if base_radius >= 40.0 || th.sprite == SPR_BAR1 {
         let h_ceil = (ceil_y - emitter_y).max(0.0);
-        if h_ceil > 0.0 && h_ceil < base_radius {
-            let atten = (1.0 - h_ceil / base_radius).powi(2);
-            let r_ceil = (base_radius * base_radius - h_ceil * h_ceil).sqrt().max(base_radius * 0.45);
+        if h_ceil > 0.0 && h_ceil < ceil_reach {
+            let atten = if ceil_linear {
+                (1.0 - h_ceil / ceil_reach).max(0.0)
+            } else {
+                (1.0 - h_ceil / ceil_reach).powi(2)
+            };
+            let r_ceil = (ceil_reach * ceil_reach - h_ceil * h_ceil).sqrt().max(base_radius * 0.45);
             halos.push(HaloInstance {
                 center: [x0, ceil_y - 0.35, z0],
                 radius: r_ceil,
@@ -2691,17 +2706,20 @@ mod tests {
 
         let mut halos = Vec::new();
 
-        // Barrel idle: green floor halo + green wall halo!
+        // Barrel idle: green ceiling halo + green wall halo (no floor halo, goo is at top facing up!)
         th.sprite = SPR_BAR1;
         unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert!(halos.len() >= 2, "must emit both floor and wall halos for barrel near wall");
-        let floor_halo = halos[0];
-        let wall_halo = halos[1];
-        assert_eq!(floor_halo.axis_v, [0.0, 0.0, 1.0]); // floor quad
-        assert_eq!(wall_halo.axis_v, [0.0, 1.0, 0.0]); // vertical wall quad
-        assert!(floor_halo.color[1] > floor_halo.color[0]); // green dominant
+        assert!(halos.len() >= 2, "must emit both ceiling and wall halos for barrel near wall");
+        // Verify no floor halo was emitted for barrel
+        assert!(halos.iter().all(|h| (h.center[1] - (10.0 + 0.35)).abs() > 0.01));
+        // Verify ceiling halo exists
+        let ceiling_halo = halos.iter().find(|h| (h.center[1] - (128.0 - 0.35)).abs() < 0.01).expect("barrel must illuminate ceiling");
+        assert_eq!(ceiling_halo.axis_v, [0.0, 0.0, 1.0]);
+        assert!(ceiling_halo.color[1] > ceiling_halo.color[0]);
+        assert!(ceiling_halo.radius >= 60.0);
+        // Verify wall halo exists
+        let wall_halo = halos.iter().find(|h| h.axis_v == [0.0, 1.0, 0.0]).expect("barrel must illuminate wall");
         assert!(wall_halo.color[1] > wall_halo.color[0]);
-        assert!(floor_halo.radius >= 60.0);
 
         // Barrel explosion: expanding fiery yellow/orange halo on floor AND wall
         halos.clear();
