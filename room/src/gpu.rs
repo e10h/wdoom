@@ -240,6 +240,8 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         }
     }
     let is_emissive = in.surface > 1.5 && in.light > 1.0;
+    let emission_val = select(0.0, in.light - 1.0, is_emissive);
+    let is_explosion = in.surface > 1.5 && in.light > 1.8;
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     let obj_ceiling = select(1.0, max(ceiling, in.light), in.surface <= 1.5 || in.light >= 0.99);
     incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
@@ -256,9 +258,9 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let shaded = albedo * incoming * bump;
     let emission = max(
         textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r,
-        select(0.0, in.light, is_emissive),
+        select(0.0, in.light, is_explosion),
     );
-    var radiance = max(shaded, albedo * emission);
+    var radiance = max(shaded, albedo * max(emission, emission_val));
     let sheen = (1.0 - roughness) * (metallic * 0.4 + 0.1) * camera.pbr.z;
     radiance = mix(radiance, radiance * (1.0 + sheen * 0.4) + incoming * sheen * 0.15, metallic * 0.5 + 0.1);
     return vec4<f32>(radiance, 1.0);
@@ -334,7 +336,9 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     let geom_n = select(vec3<f32>(0.0, 1.0, 0.0), cross_p * inverseSqrt(len2), len2 > 1e-8);
     // Directional shading for solid objects; self-luminous explosions emit uniformly.
     let is_emissive = in.light > 1.0;
-    let shade = select(clamp(0.80 + 0.20 * geom_n.y + 0.05 * geom_n.x, 0.65, 1.0), 1.0, is_emissive);
+    let emission_val = select(0.0, in.light - 1.0, is_emissive);
+    let is_explosion = in.light > 1.8;
+    let shade = select(clamp(0.80 + 0.20 * geom_n.y + 0.05 * geom_n.x, 0.65, 1.0), 1.0, is_explosion);
 
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     let obj_ceiling = select(min(ceiling, 1.0), max(ceiling, in.light), in.light >= 0.99);
@@ -342,7 +346,7 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     var doom_light = select(
         doom_diminish(vec3<f32>(in.light), in.view_dist, camera.pbr.w, camera.fill.x),
         vec3<f32>(in.light),
-        is_emissive,
+        is_explosion,
     );
     doom_light = clamp(doom_light, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
 
@@ -362,11 +366,13 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
             incoming = mix(doom_light, baked_rgb, blend);
         }
     }
-    if (is_emissive) {
+    if (is_explosion) {
         incoming = max(incoming, vec3<f32>(in.light));
     }
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
-    return vec4<f32>(in.color * incoming, 1.0);
+    let lit_color = in.color * incoming;
+    let final_color = max(lit_color, in.color * emission_val);
+    return vec4<f32>(final_color, 1.0);
 }
 "#;
 
