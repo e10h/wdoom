@@ -2232,7 +2232,7 @@ impl GpuState {
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
                 draw_scene(&mut pass, world, scene, false, msaa);
             }
-            if self.trace.ssrc {
+            if self.trace.ssrc && !msaa {
                 let image = self.play_image.as_ref().expect("play image");
                 if self.ssrc_pass.is_none() {
                     self.ssrc_pass = Some(ssrc::SsrcPass::new(&self.device, self.config.format, rw, rh));
@@ -4083,7 +4083,7 @@ fn depth_target(
     depth_target_samples(device, width, height, 1)
 }
 
-fn depth_target_samples(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> (wgpu::Texture, wgpu::TextureView) {
+pub(crate) fn depth_target_samples(device: &wgpu::Device, width: u32, height: u32, samples: u32) -> (wgpu::Texture, wgpu::TextureView) {
     let depth = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("doom_depth"),
         size: wgpu::Extent3d {
@@ -4095,7 +4095,7 @@ fn depth_target_samples(device: &wgpu::Device, width: u32, height: u32, samples:
         sample_count: samples,
         dimension: wgpu::TextureDimension::D2,
         format: wgpu::TextureFormat::Depth24Plus,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = depth.create_view(&wgpu::TextureViewDescriptor::default());

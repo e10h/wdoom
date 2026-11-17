@@ -584,3 +584,55 @@ impl SsrcPass {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ssrc_pass_renders_without_validation_errors() {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+            let adapter = match instance.request_adapter(&Default::default()).await {
+                Ok(a) => a,
+                Err(_) => return,
+            };
+            let (device, queue) = adapter.request_device(&Default::default()).await.expect("device");
+            let format = wgpu::TextureFormat::Rgba8Unorm;
+            let width = 320;
+            let height = 200;
+
+            let color_tex = device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("test_color"),
+                size: wgpu::Extent3d { width, height, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                view_formats: &[],
+            });
+            let color_view = color_tex.create_view(&Default::default());
+
+            let (_depth_tex, depth_view) = crate::gpu::depth_target_samples(&device, width, height, 1);
+
+            let mut ssrc = SsrcPass::new(&device, format, width, height);
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("test_encoder") });
+
+            ssrc.render(
+                &mut encoder,
+                &device,
+                &queue,
+                &color_view,
+                &depth_view,
+                &color_view,
+                width,
+                height,
+                1.0,
+            );
+
+            queue.submit(Some(encoder.finish()));
+        });
+    }
+}
+
