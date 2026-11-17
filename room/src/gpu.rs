@@ -421,8 +421,8 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     if (is_drop) {
         incoming = max(incoming, vec3<f32>(0.65));
     }
-    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n);
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
+    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n) * shade;
     let lit_color = in.color * incoming;
     let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
     return vec4<f32>(lit_color, out_alpha);

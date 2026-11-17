@@ -1523,32 +1523,32 @@ pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbe
         // Toxic barrel: radioactive green radiance emitting upward and outward from top rim
         (85.0, [0.08, 0.70, 0.16], 1.0)
     } else if th.sprite == SPR_BEXP {
-        // Barrel explosion: expanding fiery blast
+        // Barrel explosion: expanding brilliant fiery blast
         match frame_idx {
-            0 => (100.0, [1.2, 0.95, 0.30], 0.0),
-            1 => (150.0, [1.2, 0.80, 0.20], 0.0),
-            2 => (180.0, [1.0, 0.60, 0.10], 0.0),
-            3 => (200.0, [0.85, 0.35, 0.05], 0.0),
-            _ => (210.0, [0.50, 0.20, 0.05], 0.0),
+            0 => (140.0, [3.2, 2.6, 1.2], 0.0),
+            1 => (220.0, [2.8, 1.9, 0.5], 0.0),
+            2 => (280.0, [2.0, 1.2, 0.2], 0.0),
+            3 => (300.0, [1.3, 0.6, 0.08], 0.0),
+            _ => (320.0, [0.7, 0.25, 0.05], 0.0),
         }
     } else if th.sprite == SPR_MISL {
         if frame_idx == 0 {
-            (32.0, [1.0, 0.70, 0.20], 0.0)
+            (36.0, [1.2, 0.85, 0.25], 0.0)
         } else {
             match frame_idx {
-                1 => (90.0, [1.0, 0.85, 0.25], 0.0),
-                2 => (140.0, [1.0, 0.55, 0.10], 0.0),
-                _ => (160.0, [0.70, 0.30, 0.05], 0.0),
+                1 => (160.0, [2.8, 2.2, 0.8], 0.0),
+                2 => (240.0, [2.2, 1.3, 0.3], 0.0),
+                _ => (280.0, [1.2, 0.5, 0.08], 0.0),
             }
         }
     } else if th.sprite == SPR_PLSS {
-        (35.0, [0.20, 0.50, 1.0], 0.0)
+        (38.0, [0.25, 0.65, 1.3], 0.0)
     } else if th.sprite == SPR_PLSE {
-        (70.0, [0.30, 0.70, 1.0], 0.0)
+        (100.0, [0.45, 1.1, 1.8], 0.0)
     } else if th.sprite == SPR_BFS1 {
-        (80.0, [0.30, 1.0, 0.40], 0.0)
+        (90.0, [0.40, 1.4, 0.50], 0.0)
     } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
-        (220.0, [0.20, 1.0, 0.30], 0.0)
+        (350.0, [0.60, 2.8, 0.90], 0.0)
     } else {
         return;
     };
