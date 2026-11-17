@@ -12,7 +12,11 @@ use crate::doom::am_map::automapactive;
 use crate::doom::c_ffi::{sector_t, seg_t, side_t, subsector_t, vertex_t, LinedefFlag};
 use crate::doom::d_player::{consoleplayer, players, PspdefT, MAXPLAYERS, NUMPSPRITES};
 use crate::doom::i_video::{hw_palette_rgb, SCREENHEIGHT, SCREENWIDTH};
-use crate::doom::info::{State, MF_DROPPED, MF_SPECIAL, SPR_BEXP, SPR_MISL, SPR_PLSE};
+use crate::doom::info::{
+    State, MF_DROPPED, MF_SPECIAL, SPR_ARM1, SPR_ARM2, SPR_BAR1, SPR_BEXP, SPR_BFE1, SPR_BFE2,
+    SPR_BFS1, SPR_BON1, SPR_BON2, SPR_MEDI, SPR_MEGA, SPR_MISL, SPR_PINV, SPR_PLSE, SPR_PLSS,
+    SPR_PSTR, SPR_SOUL, SPR_STIM,
+};
 use crate::doom::m_menu::menuactive;
 use crate::doom::p_setup::{
     nodes, numnodes, numsectors, numsegs, numsubsectors, numvertexes, sectors, segs, subsectors,
@@ -105,6 +109,15 @@ pub struct VoxelBatch {
     pub instances: Vec<VoxelInstance>,
 }
 
+/// A horizontal baked ground halo decal (e.g. radioactive slime, explosion fireball, item pickup).
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+pub struct HaloInstance {
+    pub center: [f32; 3],
+    pub radius: f32,
+    pub color: [f32; 4],
+}
+
 /// One frame of world geometry plus the camera and the HUD hole.
 pub struct Scene {
     pub verts: Vec<Vertex>,
@@ -118,6 +131,8 @@ pub struct Scene {
     pub world_indices: u32,
     /// Instanced voxel models, drawn with GPU instancing.
     pub voxel_batches: Vec<VoxelBatch>,
+    /// Ground halo decals (baked circular falloffs on the floor).
+    pub halos: Vec<HaloInstance>,
     pub view_proj: [[f32; 4]; 4],
     /// Camera basis for primary rays. `right`, `up`, and `forward` are unit
     /// vectors. `aspect` is the projection aspect used by [`view_proj`].
@@ -163,6 +178,7 @@ struct Scratch {
     verts: Vec<Vertex>,
     indices: Vec<u32>,
     voxel_batches: Vec<VoxelBatch>,
+    halos: Vec<HaloInstance>,
     atlas: Option<Atlas>,
     /// Closed floor outlines in Doom map units, one per subsector.
     /// Rebuilt when a new map is loaded. Segs alone do not form these
@@ -176,6 +192,7 @@ static mut SCRATCH: Scratch = Scratch {
     verts: Vec::new(),
     indices: Vec::new(),
     voxel_batches: Vec::new(),
+    halos: Vec::new(),
     atlas: None,
     flats: Vec::new(),
     flats_key: 0,
@@ -208,6 +225,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     scratch.verts.clear();
     scratch.indices.clear();
     scratch.voxel_batches.clear();
+    scratch.halos.clear();
 
     let eye = [fx(viewx), fx(viewz), -fx(viewy)];
     let ang = viewangle as f32 * std::f32::consts::TAU / 4294967296.0;
@@ -231,6 +249,7 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
         scratch.verts.clear();
         scratch.indices.clear();
         scratch.voxel_batches.clear();
+        scratch.halos.clear();
         light_reuse();
         (opaque_indices, world_indices) =
             fill_scene(scratch, eye, ang, right, forward, cam_up, actors);
@@ -257,12 +276,14 @@ pub unsafe fn build_scene(actors: bool) -> Scene {
     let verts = std::mem::take(&mut scratch.verts);
     let indices = std::mem::take(&mut scratch.indices);
     let voxel_batches = std::mem::take(&mut scratch.voxel_batches);
+    let halos = std::mem::take(&mut scratch.halos);
     Scene {
         verts,
         indices,
         opaque_indices,
         world_indices,
         voxel_batches,
+        halos,
         view_proj,
         eye,
         right,
@@ -320,6 +341,7 @@ unsafe fn fill_scene(
                 &mut scratch.verts,
                 &mut scratch.indices,
                 &mut scratch.voxel_batches,
+                &mut scratch.halos,
                 atlas,
                 right,
                 true,
@@ -335,6 +357,7 @@ unsafe fn fill_scene(
                 &mut scratch.verts,
                 &mut scratch.indices,
                 &mut scratch.voxel_batches,
+                &mut scratch.halos,
                 atlas,
                 right,
                 false,
@@ -359,6 +382,7 @@ pub fn recycle(scene: Scene) {
         scratch.verts = scene.verts;
         scratch.indices = scene.indices;
         scratch.voxel_batches = scene.voxel_batches;
+        scratch.halos = scene.halos;
     }
 }
 
@@ -1410,10 +1434,128 @@ fn dedup_poly(poly: &mut Vec<[f32; 2]>) {
     }
 }
 
+const FF_FRAMEMASK: i32 = 0x7fff;
+
+unsafe fn compute_halo(th: &mobj_t) -> Option<HaloInstance> {
+    let floor_y = fx(th.floorz) + 0.35;
+    let height_above_floor = (fx(th.z) - fx(th.floorz)).max(0.0);
+    let atten = (1.0 - height_above_floor / 160.0).max(0.0);
+    if atten <= 0.0 {
+        return None;
+    }
+
+    let center = [fx(th.x), floor_y, -fx(th.y)];
+    let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
+
+    // 1. Toxic Barrel: radioactive green ground halo
+    if th.sprite == SPR_BAR1 {
+        return Some(HaloInstance {
+            center,
+            radius: 28.0,
+            color: [0.10, 0.95, 0.20, 0.70 * atten],
+        });
+    }
+
+    // 2. Exploding Barrel: expanding fiery yellow/orange flash
+    if th.sprite == SPR_BEXP {
+        let (radius, color) = match frame_idx {
+            0 => (50.0, [1.0, 0.90, 0.25, 1.0]),
+            1 => (90.0, [1.0, 0.75, 0.15, 1.0]),
+            2 => (130.0, [1.0, 0.55, 0.10, 0.85]),
+            3 => (150.0, [0.85, 0.35, 0.05, 0.55]),
+            _ => (160.0, [0.50, 0.20, 0.05, 0.25]),
+        };
+        return Some(HaloInstance {
+            center,
+            radius,
+            color: [color[0], color[1], color[2], color[3] * atten],
+        });
+    }
+
+    // 3. Rocket projectile & explosion
+    if th.sprite == SPR_MISL {
+        if frame_idx == 0 {
+            return Some(HaloInstance {
+                center,
+                radius: 22.0,
+                color: [1.0, 0.70, 0.20, 0.60 * atten],
+            });
+        } else {
+            let (radius, color) = match frame_idx {
+                1 => (75.0, [1.0, 0.85, 0.25, 1.0]),
+                2 => (120.0, [1.0, 0.55, 0.10, 0.80]),
+                _ => (140.0, [0.70, 0.30, 0.05, 0.40]),
+            };
+            return Some(HaloInstance {
+                center,
+                radius,
+                color: [color[0], color[1], color[2], color[3] * atten],
+            });
+        }
+    }
+
+    // 4. Plasma projectile & impact
+    if th.sprite == SPR_PLSS {
+        return Some(HaloInstance {
+            center,
+            radius: 24.0,
+            color: [0.20, 0.50, 1.0, 0.70 * atten],
+        });
+    }
+    if th.sprite == SPR_PLSE {
+        return Some(HaloInstance {
+            center,
+            radius: 55.0,
+            color: [0.30, 0.70, 1.0, 0.90 * atten],
+        });
+    }
+
+    // 5. BFG shot & explosion
+    if th.sprite == SPR_BFS1 {
+        return Some(HaloInstance {
+            center,
+            radius: 60.0,
+            color: [0.30, 1.0, 0.40, 0.90 * atten],
+        });
+    }
+    if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
+        let (radius, alpha) = match frame_idx {
+            0 => (100.0, 1.0),
+            1 => (150.0, 1.0),
+            2 => (180.0, 0.85),
+            3 => (200.0, 0.60),
+            _ => (210.0, 0.30),
+        };
+        return Some(HaloInstance {
+            center,
+            radius,
+            color: [0.20, 1.0, 0.30, alpha * atten],
+        });
+    }
+
+    // 6. Pickups / Collectibles
+    if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
+        let (radius, color) = match th.sprite {
+            SPR_ARM1 | SPR_ARM2 | SPR_SOUL | SPR_MEGA => (22.0, [0.15, 0.45, 1.0, 0.55]),
+            SPR_BON1 | SPR_BON2 | SPR_STIM | SPR_MEDI => (18.0, [0.20, 0.90, 0.30, 0.50]),
+            SPR_PINV | SPR_PSTR => (22.0, [1.0, 0.80, 0.20, 0.60]),
+            _ => (18.0, [0.60, 0.75, 0.90, 0.35]),
+        };
+        return Some(HaloInstance {
+            center,
+            radius,
+            color: [color[0], color[1], color[2], color[3] * atten],
+        });
+    }
+
+    None
+}
+
 unsafe fn push_sprites(
     verts: &mut Vec<Vertex>,
     indices: &mut Vec<u32>,
     voxel_batches: &mut Vec<VoxelBatch>,
+    halos: &mut Vec<HaloInstance>,
     atlas: &Atlas,
     right: [f32; 3],
     voxels: bool,
@@ -1475,6 +1617,11 @@ unsafe fn push_sprites(
             } else {
                 [-1.0, -1.0]
             };
+            if voxels {
+                if let Some(halo) = compute_halo(th) {
+                    halos.push(halo);
+                }
+            }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
                     let yaw = (th.angle as f32) * std::f32::consts::TAU / 4294967296.0 + extra;
@@ -2394,5 +2541,49 @@ mod tests {
         assert!(y >= world_light_limit());
         assert!(y + h <= LIGHTMAP_SIZE as i32);
         assert!(x + w <= LIGHTMAP_SIZE as i32);
+    }
+
+    #[test]
+    fn baked_halo_emission_for_barrels_and_explosions() {
+        use crate::doom::info::{MF_SPECIAL, SPR_ARM1, SPR_BAR1, SPR_BEXP, SPR_MISL, SPR_PLSS};
+        use crate::doom::p_telept::mobj_t;
+
+        let mut th: mobj_t = unsafe { std::mem::zeroed() };
+        th.x = 100 << 16;
+        th.y = 200 << 16;
+        th.z = 10 << 16;
+        th.floorz = 10 << 16;
+
+        // Barrel idle: radioactive green halo
+        th.sprite = SPR_BAR1;
+        let halo = unsafe { super::compute_halo(&th) }.expect("barrel halo");
+        assert_eq!(halo.radius, 28.0);
+        assert!(halo.color[1] > halo.color[0] && halo.color[1] > halo.color[2]); // green dominant
+
+        // Barrel explosion: expanding fiery yellow/orange halo
+        th.sprite = SPR_BEXP;
+        th.frame = 0;
+        let h0 = unsafe { super::compute_halo(&th) }.expect("bexp 0");
+        th.frame = 2;
+        let h2 = unsafe { super::compute_halo(&th) }.expect("bexp 2");
+        assert!(h2.radius > h0.radius);
+        assert!(h0.color[0] >= 0.9 && h0.color[1] >= 0.8); // yellow flash
+
+        // Rocket in flight
+        th.sprite = SPR_MISL;
+        th.frame = 0;
+        let hm = unsafe { super::compute_halo(&th) }.expect("misl 0");
+        assert_eq!(hm.radius, 22.0);
+
+        // Plasma in flight: blue halo
+        th.sprite = SPR_PLSS;
+        let hp = unsafe { super::compute_halo(&th) }.expect("plasma");
+        assert!(hp.color[2] > hp.color[0] && hp.color[2] > hp.color[1]); // blue dominant
+
+        // Armor pickup: blue halo
+        th.sprite = SPR_ARM1;
+        th.flags = MF_SPECIAL;
+        let ha = unsafe { super::compute_halo(&th) }.expect("armor");
+        assert!(ha.color[2] > ha.color[0]);
     }
 }

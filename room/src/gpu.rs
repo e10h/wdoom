@@ -1059,6 +1059,15 @@ struct WorldGpu {
     voxel_index_cap: u64,
     voxel_inst_cap: u64,
     voxel_instances_len: usize,
+    halo_pipeline: wgpu::RenderPipeline,
+    halo_pipeline_msaa: wgpu::RenderPipeline,
+    halo_bind_group: wgpu::BindGroup,
+    halo_quad_verts: wgpu::Buffer,
+    halo_quad_indices: wgpu::Buffer,
+    halo_instances: wgpu::Buffer,
+    halo_inst_cap: u64,
+    halo_instances_len: usize,
+    _halo_tex: wgpu::Texture,
     /// Hardware ray queries are available on this device.
     ray_query: bool,
     ray: Option<RayGpu>,
@@ -1151,7 +1160,7 @@ impl Default for TraceSettings {
             normal_strength: 1.0,
             roughness_scale: 1.0,
             specular_sheen: 1.0,
-            ssrc: true,
+            ssrc: false,
             ssrc_strength: 1.0,
             bounce_boost: 1.8,
             baked_light: true,
@@ -3734,6 +3743,112 @@ impl GpuState {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        let halo_bgl = self.device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("doom_halo_bind_group_layout"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::VERTEX,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        multisampled: false,
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                    count: None,
+                },
+            ],
+        });
+        let (halo_tex, halo_view) = create_baked_halo_texture(&self.device, &self.queue);
+        let halo_sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("doom_halo_sampler"),
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
+            ..Default::default()
+        });
+        let halo_bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("doom_halo_bind_group"),
+            layout: &halo_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: uniform.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&halo_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Sampler(&halo_sampler),
+                },
+            ],
+        });
+        let halo_pipeline_layout = self.device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("doom_halo_pipeline_layout"),
+            bind_group_layouts: &[Some(&halo_bgl)],
+            immediate_size: 0,
+        });
+        let halo_shader = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("doom_halo_shader"),
+            source: wgpu::ShaderSource::Wgsl(HALO_SHADER.into()),
+        });
+        let halo_pipeline = halo_pipeline(&self.device, &halo_pipeline_layout, &halo_shader, self.config.format);
+        let halo_pipeline_msaa = halo_msaa_pipeline(&self.device, &halo_pipeline_layout, &halo_shader, self.config.format);
+        let halo_quad_verts = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_halo_quad_verts"),
+            size: (std::mem::size_of::<HaloVertex>() * 4) as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(
+            &halo_quad_verts,
+            0,
+            bytemuck::cast_slice(&[
+                HaloVertex { pos: [-1.0, -1.0], uv: [0.0, 0.0] },
+                HaloVertex { pos: [ 1.0, -1.0], uv: [1.0, 0.0] },
+                HaloVertex { pos: [ 1.0,  1.0], uv: [1.0, 1.0] },
+                HaloVertex { pos: [-1.0,  1.0], uv: [0.0, 1.0] },
+            ]),
+        );
+        let halo_quad_indices = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_halo_quad_indices"),
+            size: 24,
+            usage: wgpu::BufferUsages::INDEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        self.queue.write_buffer(
+            &halo_quad_indices,
+            0,
+            bytemuck::cast_slice(&[0u32, 1, 2, 0, 2, 3]),
+        );
+        let halo_instances = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("doom_halo_instances"),
+            size: 4 * 1024,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let light_hits = light_hit_buffer(&self.device, LIGHT_HIT_CAP);
         // Browsers display uploaded bakes; the native baking pipeline blocks
         // on validation and requires compute limits unavailable on WebGL.
@@ -3780,6 +3895,15 @@ impl GpuState {
             voxel_index_cap: 64 * 1024,
             voxel_inst_cap: 4 * 1024,
             voxel_instances_len: 0,
+            halo_pipeline,
+            halo_pipeline_msaa,
+            halo_bind_group,
+            halo_quad_verts,
+            halo_quad_indices,
+            halo_instances,
+            halo_inst_cap: 4 * 1024,
+            halo_instances_len: 0,
+            _halo_tex: halo_tex,
             ray_query: self.ray_query,
             ray: None,
         });
@@ -3898,6 +4022,224 @@ pub(super) fn voxel_instance_layout() -> wgpu::VertexBufferLayout<'static> {
         attributes: &VOXEL_INSTANCE_ATTRS,
     }
 }
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
+pub struct HaloVertex {
+    pub pos: [f32; 2],
+    pub uv: [f32; 2],
+}
+
+const HALO_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 0,
+        shader_location: 0,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 8,
+        shader_location: 1,
+    },
+];
+
+pub(super) fn halo_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<HaloVertex>() as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &HALO_VERTEX_ATTRS,
+    }
+}
+
+const HALO_INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 0,
+        shader_location: 2,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32,
+        offset: 12,
+        shader_location: 3,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 16,
+        shader_location: 4,
+    },
+];
+
+pub(super) fn halo_instance_layout() -> wgpu::VertexBufferLayout<'static> {
+    wgpu::VertexBufferLayout {
+        array_stride: std::mem::size_of::<crate::hw::HaloInstance>() as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &HALO_INSTANCE_ATTRS,
+    }
+}
+
+pub(super) fn halo_pipeline(
+    device: &wgpu::Device,
+    layout: &wgpu::PipelineLayout,
+    shader: &wgpu::ShaderModule,
+    format: wgpu::TextureFormat,
+) -> wgpu::RenderPipeline {
+    device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("doom_halo_pipeline"),
+        layout: Some(layout),
+        vertex: wgpu::VertexState {
+            module: shader,
+            entry_point: Some("vs_halo"),
+            buffers: &[halo_vertex_layout(), halo_instance_layout()],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: shader,
+            entry_point: Some("fs_halo"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState {
+                    color: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::One,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                    alpha: wgpu::BlendComponent {
+                        src_factor: wgpu::BlendFactor::Zero,
+                        dst_factor: wgpu::BlendFactor::One,
+                        operation: wgpu::BlendOperation::Add,
+                    },
+                }),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            cull_mode: None,
+            ..Default::default()
+        },
+        depth_stencil: Some(depth_state(false, wgpu::CompareFunction::LessEqual)),
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: None,
+    })
+}
+
+fn create_baked_halo_texture(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+) -> (wgpu::Texture, wgpu::TextureView) {
+    const SIZE: u32 = 64;
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("doom_baked_halo_texture"),
+        size: wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    let mut data = vec![0u8; (SIZE * SIZE * 4) as usize];
+    let center = (SIZE as f32 - 1.0) * 0.5;
+    let max_r = center;
+    for y in 0..SIZE {
+        for x in 0..SIZE {
+            let dx = (x as f32 - center) / max_r;
+            let dy = (y as f32 - center) / max_r;
+            let r = (dx * dx + dy * dy).sqrt();
+            if r < 1.0 {
+                let t = 1.0 - r * r;
+                let val = (t * t * 255.0).clamp(0.0, 255.0) as u8;
+                let idx = ((y * SIZE + x) * 4) as usize;
+                data[idx] = val;
+                data[idx + 1] = val;
+                data[idx + 2] = val;
+                data[idx + 3] = val;
+            }
+        }
+    }
+
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &data,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(SIZE * 4),
+            rows_per_image: Some(SIZE),
+        },
+        wgpu::Extent3d {
+            width: SIZE,
+            height: SIZE,
+            depth_or_array_layers: 1,
+        },
+    );
+
+    let view = texture.create_view(&Default::default());
+    (texture, view)
+}
+
+const HALO_SHADER: &str = r#"
+struct Camera {
+    view_proj: mat4x4<f32>,
+    eye: vec4<f32>,
+    fill: vec4<f32>,
+    pbr: vec4<f32>,
+    extra: vec4<f32>,
+};
+
+@group(0) @binding(0) var<uniform> camera: Camera;
+@group(0) @binding(1) var halo_tex: texture_2d<f32>;
+@group(0) @binding(2) var halo_samp: sampler;
+
+struct VertexInput {
+    @location(0) local_pos: vec2<f32>,
+    @location(1) uv: vec2<f32>,
+};
+
+struct InstanceInput {
+    @location(2) center: vec3<f32>,
+    @location(3) radius: f32,
+    @location(4) color: vec4<f32>,
+};
+
+struct VertexOutput {
+    @builtin(position) clip_pos: vec4<f32>,
+    @location(0) uv: vec2<f32>,
+    @location(1) color: vec4<f32>,
+};
+
+@vertex
+fn vs_halo(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
+    var out: VertexOutput;
+    let world_pos = vec3<f32>(
+        inst.center.x + vert.local_pos.x * inst.radius,
+        inst.center.y,
+        inst.center.z + vert.local_pos.y * inst.radius,
+    );
+    out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
+    out.uv = vert.uv;
+    out.color = inst.color;
+    return out;
+}
+
+@fragment
+fn fs_halo(in: VertexOutput) -> @location(0) vec4<f32> {
+    let t = textureSample(halo_tex, halo_samp, in.uv).r;
+    let alpha = t * in.color.a;
+    return vec4<f32>(in.color.rgb * alpha, alpha);
+}
+"#;
 
 fn depth_state(write: bool, compare: wgpu::CompareFunction) -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
@@ -4163,6 +4505,18 @@ fn ray_extent(view_w: f32, view_h: f32, max_h: u32) -> (u32, u32) {
 }
 
 impl WorldGpu {
+    fn draw_halos<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, msaa: bool) {
+        if self.halo_instances_len == 0 {
+            return;
+        }
+        pass.set_pipeline(if msaa { &self.halo_pipeline_msaa } else { &self.halo_pipeline });
+        pass.set_bind_group(0, &self.halo_bind_group, &[]);
+        pass.set_vertex_buffer(0, self.halo_quad_verts.slice(..));
+        pass.set_vertex_buffer(1, self.halo_instances.slice(..));
+        pass.set_index_buffer(self.halo_quad_indices.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..6, 0, 0..self.halo_instances_len as u32);
+    }
+
     fn draw_voxels<'a>(&'a self, pass: &mut wgpu::RenderPass<'a>, scene: &crate::hw::Scene, msaa: bool) {
         if scene.voxel_batches.is_empty() || self.voxel_instances_len == 0 {
             return;
@@ -4213,6 +4567,7 @@ fn draw_scene<'a>(
         pass.draw_indexed(0..world_n, 0, 0..1);
     }
     if !trace {
+        world.draw_halos(pass, msaa);
         world.draw_voxels(pass, scene, msaa);
     }
 }
@@ -4248,6 +4603,7 @@ fn draw_overlays<'a>(
         pass.set_bind_group(0, &world.bind_group, &[]);
         pass.draw_indexed(sprites..world_n, 0, 0..1);
     }
+    world.draw_halos(pass, false);
     world.draw_voxels(pass, scene, false);
 }
 
@@ -4465,6 +4821,24 @@ fn upload_mesh(
             world.voxel_inst_cap = size;
         }
         queue.write_buffer(&world.voxel_instances, 0, inst_bytes);
+    }
+
+    // Dynamic halo instances for this frame
+    let total_halos = scene.halos.len();
+    world.halo_instances_len = total_halos;
+    if total_halos > 0 {
+        let halo_bytes = bytemuck::cast_slice(&scene.halos);
+        if halo_bytes.len() as u64 > world.halo_inst_cap {
+            let size = (halo_bytes.len() as u64).next_power_of_two().max(4 * 1024);
+            world.halo_instances = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("doom_halo_instances"),
+                size,
+                usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            });
+            world.halo_inst_cap = size;
+        }
+        queue.write_buffer(&world.halo_instances, 0, halo_bytes);
     }
 }
 
@@ -6287,7 +6661,7 @@ mod fixture_light_test;
 mod msaa_test;
 
 mod msaa;
-use msaa::{msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
+use msaa::{halo_msaa_pipeline, msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
 
 mod ssrc;
 
