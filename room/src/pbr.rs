@@ -36,8 +36,24 @@ fn authored_masks() -> &'static HashMap<[u8; 8], PbrMask> {
             if let Ok(decompressed) = miniz_oxide::inflate::decompress_to_vec_zlib(&data[at..at + comp_len]) {
                 if decompressed.len() == uncomp_len && decompressed.len() == w * h * 4 {
                     let mut pixels = Vec::with_capacity(w * h);
+                    let mut sum_x: i64 = 0;
+                    let mut sum_y: i64 = 0;
                     for chunk in decompressed.chunks_exact(4) {
+                        sum_x += chunk[0] as i64;
+                        sum_y += chunk[1] as i64;
                         pixels.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+                    }
+                    // Demean tangent space normals:
+                    // Authored normal maps in doom_pbr.bin often have non-zero tangent tilt (mean Nx, Ny != 128)
+                    // which causes surfaces to tilt upwards/sideways and catch direct light in shadows.
+                    let count = pixels.len().max(1) as i64;
+                    let mean_x = (sum_x / count) as i32;
+                    let mean_y = (sum_y / count) as i32;
+                    if mean_x != 128 || mean_y != 128 {
+                        for p in &mut pixels {
+                            p[0] = (p[0] as i32 - mean_x + 128).clamp(0, 255) as u8;
+                            p[1] = (p[1] as i32 - mean_y + 128).clamp(0, 255) as u8;
+                        }
                     }
                     map.insert(name, PbrMask { width: w, height: h, pixels });
                 }
@@ -86,7 +102,7 @@ pub fn generate_procedural(name: &[u8; 8], w: i32, h: i32, rgb_pixels: &[u8]) ->
 
     let is_metal = is_metallic_name(name);
     let is_liquid = is_liquid_name(name);
-    let bump_scale = if is_liquid { 1.0 } else { 2.5 };
+    let bump_scale = if is_liquid { 1.0 } else { 1.2 };
 
     let mut out = Vec::with_capacity(uw * uh);
     for y in 0..uh {
@@ -140,6 +156,13 @@ mod tests {
         let masks = authored_masks();
         assert!(!masks.is_empty(), "expected authored PBR masks");
         assert!(masks.contains_key(b"TEKWALL4"), "TEKWALL4 should be in PBR pack");
+        let tek = masks.get(b"TEKWALL4").unwrap();
+        let sum_x: u64 = tek.pixels.iter().map(|p| p[0] as u64).sum();
+        let sum_y: u64 = tek.pixels.iter().map(|p| p[1] as u64).sum();
+        let mean_x = (sum_x / tek.pixels.len() as u64) as i32;
+        let mean_y = (sum_y / tek.pixels.len() as u64) as i32;
+        assert_eq!(mean_x, 128, "TEKWALL4 mean normal X should be centered at 128");
+        assert_eq!(mean_y, 128, "TEKWALL4 mean normal Y should be centered at 128");
     }
 
     #[test]
