@@ -1,6 +1,6 @@
 {
-  "version": "4b33d926b8ced19f",
-  "sourceSha256": "145450611e04417d1b008d6fdf1a09b3f08b625b0396e6cc538cdd1131257a4f",
+  "version": "ab4fba1439d7ab57",
+  "sourceSha256": "e12f10cc2080547dbe04f22330f4e78d8e2d239dada39072e449743152b3b2fb",
   "bakes": {
     "light_e1m1_418868fd2c508de1.rmlt": {
       "nativeSha256": "26ffa8bf76a32144b2ed49a3c00b7d0dd5175643f7e9dd7cea3389f1c757abbd",
@@ -24,10 +24,10 @@
     "LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
     "LICENSE-DOOM1": "3b1e13d2554dca18d35f8dfc13c95f7421af17ff2163355892f08e20ac472cc3",
     "NOTICE.md": "f081f6f2158d7778cbc6025a5379688abe6a3e88aedc6cdb200c3b32c90c6630",
-    "assets/4b33d926b8ced19f/index.js": "bece2831896471235363aa973f5c98ac9d423538ab2560376843d3782b5104ef",
-    "assets/4b33d926b8ced19f/pkg/room.js": "aaa54c478644290f2af373f1a90e4ca5a87c90189948d7eaa3bcf1b5cf701646",
-    "assets/4b33d926b8ced19f/pkg/room_bg.wasm": "7f3ae9c750a48e8ef542b501cbac7d76571e04f6f1a454897ffdcbe970f50279",
-    "index.html": "71180a24eb126c384fd9ae2da1625da1c8db7bcac81ab9111571f0fe4d591d2e",
+    "assets/ab4fba1439d7ab57/index.js": "bece2831896471235363aa973f5c98ac9d423538ab2560376843d3782b5104ef",
+    "assets/ab4fba1439d7ab57/pkg/room.js": "aaa54c478644290f2af373f1a90e4ca5a87c90189948d7eaa3bcf1b5cf701646",
+    "assets/ab4fba1439d7ab57/pkg/room_bg.wasm": "2ffc07368952776e473bbc0e8c55504bb932dbe7a29afb94c5d2d38e6a7e23d2",
+    "index.html": "7f83931fb6884ddbcc628b6b2b4ad1dfc394ca03fb333e0913872e82dd26175f",
     "light/light_e1m1_418868fd2c508de1.rmlt": "ce95107f28a974025e00a8dd00da1140cd75c04c4e55a8113817d34469a9c293",
     "light/light_e1m2_d4897360a36456a0.rmlt": "e0b624cc7adab23a0a511e0f85a6499fe2e0dea0bbc829caab1611838c977b9e",
     "light/light_e1m3_e7ceee46f084e500.rmlt": "23e27370240b164b7d2259d9fefa76482dd7fe09a333be055f2201f5954a9f21",

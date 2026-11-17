@@ -87,8 +87,8 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
     var total_irradiance = vec3<f32>(0.0);
     var total_weight = 0.0;
 
-    // 8 primary directions around the 2D horizon
-    let NUM_DIRS = 8;
+    // 16 primary directions around the 2D horizon (high-resolution angular sampling)
+    let NUM_DIRS = 16;
     let inv_dims = 1.0 / vec2<f32>(dims);
     let radius_scale = u.params.y;
 
@@ -126,11 +126,15 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 }
 
                 let ds = fetch_depth(sample_coord, dims);
+                let sample_uv = sample_px * inv_dims;
+                // Soft edge vignette to avoid harsh popping as emitters leave the camera frustum:
+                let edge_dist = min(min(sample_uv.x, 1.0 - sample_uv.x), min(sample_uv.y, 1.0 - sample_uv.y));
+                let edge_fade = clamp(edge_dist * 20.0, 0.0, 1.0);
 
                 if (ds >= 0.9999) {
                     // Reached the open sky through a window or opening:
-                    let sky_sample = textureSampleLevel(t_color, s_sampler, sample_px * inv_dims, 0.0).rgb;
-                    ray_radiance = sky_sample * 0.9;
+                    let sky_sample = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
+                    ray_radiance = sky_sample * 0.9 * edge_fade;
                     hit_found = true;
                     break;
                 }
@@ -139,7 +143,7 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 let depth_diff = z0 - zs;
                 let abs_depth = abs(depth_diff);
 
-                let hit_color = textureSampleLevel(t_color, s_sampler, sample_px * inv_dims, 0.0).rgb;
+                let hit_color = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
                 let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
 
                 // Detect bright emissive sources (explosions, fire, torches, plasma)
@@ -158,7 +162,7 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                         let emit_boost = 3.0 + pow(lum_norm, 1.8) * 10.0;
                         let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
                         let falloff = 1.0 / (1.0 + dist_3d * 0.012);
-                        ray_radiance = hit_color * emit_boost * falloff;
+                        ray_radiance = hit_color * emit_boost * falloff * edge_fade;
                         hit_found = true;
                         break;
                     }
@@ -168,7 +172,7 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                     if (depth_diff > 2.0 && depth_diff < thickness) {
                         let falloff = 1.0 / (1.0 + dist * 0.025);
                         // Restrained ambient bounce so dark corridors stay moody
-                        ray_radiance = hit_color * 0.28 * falloff;
+                        ray_radiance = hit_color * 0.28 * falloff * edge_fade;
                         hit_found = true;
                         break;
                     }
@@ -662,3 +666,4 @@ mod tests {
         });
     }
 }
+
