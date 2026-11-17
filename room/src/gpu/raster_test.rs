@@ -300,7 +300,7 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                                 if opposite_view {
                                     [255, 0, 0, 255]
                                 } else {
-                                    [255, 255, 255, 255]
+                                    [128, 128, 128, 255]
                                 }
                             } else if sample == [0, 0, 0, 0x3c00] {
                                 [0, 0, 0, 255]

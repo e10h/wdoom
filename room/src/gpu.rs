@@ -196,11 +196,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let albedo = color.rgb * in.tint;
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
-    var radiance = shaded;
-    if (emission > 0.0) {
-        let emissive = albedo * emission * max(1.0, camera.fill.y);
-        radiance = max(shaded, emissive);
-    }
+    let radiance = max(shaded, albedo * emission);
     return vec4<f32>(radiance, 1.0);
 }
 
@@ -222,11 +218,7 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     let albedo = color.rgb * in.tint;
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
-    var radiance = shaded;
-    if (emission > 0.0) {
-        let emissive = albedo * emission * max(1.0, camera.fill.y);
-        radiance = max(shaded, emissive);
-    }
+    let radiance = max(shaded, albedo * emission);
     return vec4<f32>(radiance, 1.0);
 }
 

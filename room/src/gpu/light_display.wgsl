@@ -7,7 +7,6 @@ fn display_light(incoming: vec3<f32>, albedo: vec3<f32>, emission: f32,
     if (emission <= 0.0) {
         return shaded;
     }
-    // Retain full vibrant saturation and original texture brightness for emissive elements.
-    let emissive = albedo * emission * max(1.0, emission_scale);
-    return max(shaded, emissive);
+    // Retain original vibrant texture color at full illumination without blowing out to white.
+    return max(shaded, albedo * emission);
 }
