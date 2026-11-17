@@ -40,6 +40,14 @@ export function get_ssrc_strength() {
 }
 
 /**
+ * @returns {boolean}
+ */
+export function is_baked_light_enabled() {
+    const ret = wasm.is_baked_light_enabled();
+    return ret !== 0;
+}
+
+/**
  * Check whether 4× MSAA is currently enabled.
  * @returns {boolean}
  */
@@ -63,6 +71,13 @@ export function is_smaa_enabled() {
 export function is_ssrc_enabled() {
     const ret = wasm.is_ssrc_enabled();
     return ret !== 0;
+}
+
+/**
+ * @param {boolean} val
+ */
+export function set_baked_light(val) {
+    wasm.set_baked_light(val);
 }
 
 /**
@@ -138,6 +153,14 @@ export function start_doom(canvas_id, custom_wad) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * @returns {boolean}
+ */
+export function toggle_baked_light() {
+    const ret = wasm.toggle_baked_light();
+    return ret !== 0;
 }
 
 /**

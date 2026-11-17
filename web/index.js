@@ -20,6 +20,7 @@ window.get_ssrc_strength = get_ssrc_strength;
 
 const canvas = document.getElementById('doom-canvas');
 const status = document.getElementById('status');
+const btnBake = document.getElementById('btn-bake');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
 const btnSsrc = document.getElementById('btn-ssrc');
@@ -30,6 +31,12 @@ const sliderRoughness = document.getElementById('slider-roughness');
 
 function updateButtonStates() {
   try {
+    if (btnBake) {
+      const bakeOn = is_baked_light_enabled();
+      btnBake.textContent = `Bake: ${bakeOn ? 'ON' : 'OFF'}`;
+      btnBake.classList.toggle('active', bakeOn);
+    }
+
     const msaaOn = is_msaa_enabled();
     btnMsaa.textContent = `MSAA (4×): ${msaaOn ? 'ON' : 'OFF'}`;
     btnMsaa.classList.toggle('active', msaaOn);
@@ -46,6 +53,16 @@ function updateButtonStates() {
   } catch (_) {
     // Before doom/GPU is initialized
   }
+}
+
+if (btnBake) {
+  btnBake.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const now = !is_baked_light_enabled();
+    set_baked_light(now);
+    updateButtonStates();
+    canvas.focus();
+  });
 }
 
 if (btnSsrc) {

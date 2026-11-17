@@ -195,7 +195,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         discard;
     }
     var incoming = vec3<f32>(in.light);
-    if (in.light_uv.x >= 0.0) {
+    if (camera.fill.w > 0.5 && in.light_uv.x >= 0.0) {
         let dims = textureDimensions(light_tex);
         let coord = clamp(
             vec2<i32>(in.light_uv * vec2<f32>(dims)),
@@ -1007,6 +1007,8 @@ pub(crate) struct TraceSettings {
     pub(crate) ssrc: bool,
     /// Multiplier for SSRC diffuse bounce irradiance (0.0 to 3.0).
     pub(crate) ssrc_strength: f32,
+    /// Use raytraced baked lightmap when rendering Play mode.
+    pub(crate) baked_light: bool,
 }
 
 impl Default for TraceSettings {
@@ -1036,6 +1038,7 @@ impl Default for TraceSettings {
             specular_sheen: 1.0,
             ssrc: true,
             ssrc_strength: 1.0,
+            baked_light: true,
         }
     }
 }
@@ -1801,7 +1804,12 @@ impl GpuState {
             upload_mesh(world, &self.device, &self.queue, scene);
             let cam = WorldUniform {
                 view_proj: scene.view_proj,
-                fill: [self.trace.min_light, self.trace.emission, self.trace.max_light, 0.0],
+                fill: [
+                    self.trace.min_light,
+                    self.trace.emission,
+                    self.trace.max_light,
+                    if self.trace.baked_light { 1.0 } else { 0.0 },
+                ],
                 pbr: [self.trace.normal_strength, self.trace.roughness_scale, self.trace.specular_sheen, 0.0],
             };
             self.queue
@@ -2907,6 +2915,19 @@ impl GpuState {
 
     pub fn set_ssrc_strength(&mut self, val: f32) {
         self.trace.ssrc_strength = val.clamp(0.0, 3.0);
+    }
+
+    pub fn baked_light(&self) -> bool {
+        self.trace.baked_light
+    }
+
+    pub fn set_baked_light(&mut self, val: bool) {
+        self.trace.baked_light = val;
+    }
+
+    pub(crate) fn toggle_baked_light(&mut self) -> bool {
+        self.trace.baked_light = !self.trace.baked_light;
+        self.trace.baked_light
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {

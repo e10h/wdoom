@@ -94,6 +94,9 @@ impl TraceUi {
                 } else {
                     "Walk the empty map to fill light. Enemies are frozen and cannot hurt you."
                 });
+                if controls.playing() {
+                    ui.checkbox(&mut controls.baked_light, "Baked light (8 or F6)");
+                }
                 ui.add(
                     egui::Slider::new(&mut controls.min_light, 0.0..=1.0)
                         .text("Min light"),

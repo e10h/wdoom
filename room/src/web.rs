@@ -480,3 +480,26 @@ pub fn get_ssrc_strength() -> f32 {
         gpu.as_ref().map_or(1.0, |g| g.ssrc_strength())
     })
 }
+
+#[wasm_bindgen]
+pub fn toggle_baked_light() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        gpu.as_mut().map_or(true, |g| g.toggle_baked_light())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_baked_light(val: bool) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_baked_light(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn is_baked_light_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(true, |g| g.baked_light())
+    })
+}
