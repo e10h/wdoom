@@ -289,7 +289,10 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
     let radiance = max(shaded, albedo * emission);
-    return vec4<f32>(radiance, 1.0);
+    let is_drop = in.light > 1.9 && in.light < 3.0;
+    let is_explosion = in.light >= 3.0;
+    let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
+    return vec4<f32>(radiance, out_alpha);
 }
 
 struct VoxelVertexInput {
@@ -339,8 +342,8 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     let len2 = dot(cross_p, cross_p);
     let geom_n = select(vec3<f32>(0.0, 1.0, 0.0), cross_p * inverseSqrt(len2), len2 > 1e-8);
     // Directional shading for solid objects; self-luminous explosions emit uniformly.
-    let is_drop = in.light > 2.0;
-    let is_explosion = in.light > 1.8 && !is_drop;
+    let is_drop = in.light > 1.9 && in.light < 3.0;
+    let is_explosion = in.light >= 3.0;
     let actual_light = select(in.light, in.light - 2.0, is_drop);
     let shade = select(clamp(0.80 + 0.20 * geom_n.y + 0.05 * geom_n.x, 0.65, 1.0), 1.0, is_explosion);
 
@@ -378,7 +381,8 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     }
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     let lit_color = in.color * incoming;
-    return vec4<f32>(lit_color, select(1.0, 0.40, is_drop));
+    let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
+    return vec4<f32>(lit_color, out_alpha);
 }
 "#;
 
