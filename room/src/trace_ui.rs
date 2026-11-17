@@ -101,7 +101,7 @@ impl TraceUi {
                             .text("Bake / Doom blend"),
                     );
                     ui.add(
-                        egui::Slider::new(&mut controls.diminish, 0.0..=1.5)
+                        egui::Slider::new(&mut controls.diminish, 0.0..=3.0)
                             .text("OG Doom diminishing"),
                     );
                 }

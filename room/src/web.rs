@@ -500,7 +500,7 @@ pub fn set_diminish(val: f32) {
 #[wasm_bindgen]
 pub fn get_diminish() -> f32 {
     GPU.with_borrow(|gpu| {
-        gpu.as_ref().map_or(1.0, |g| g.diminish())
+        gpu.as_ref().map_or(1.5, |g| g.diminish())
     })
 }
 

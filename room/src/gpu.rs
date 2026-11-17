@@ -1057,7 +1057,7 @@ impl Default for TraceSettings {
             height: 720,
             world_space: true,
             flashlight: 0.0,
-            min_light: 0.23,
+            min_light: 0.0,
             max_light: 2.0,
             doom_res: true,
             msaa: false,
@@ -1074,7 +1074,7 @@ impl Default for TraceSettings {
             specular_sheen: 1.0,
             bounce_boost: 1.8,
             baked_light: true,
-            diminish: 1.0,
+            diminish: 1.5,
             light_blend: 0.5,
         }
     }
@@ -2929,7 +2929,7 @@ impl GpuState {
     }
 
     pub fn set_diminish(&mut self, val: f32) {
-        self.trace.diminish = val.clamp(0.0, 2.0);
+        self.trace.diminish = val.clamp(0.0, 3.0);
     }
 
     pub fn light_blend(&self) -> f32 {
