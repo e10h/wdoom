@@ -519,3 +519,19 @@ pub fn get_light_blend() -> f32 {
         gpu.as_ref().map_or(0.5, |g| g.light_blend())
     })
 }
+
+#[wasm_bindgen]
+pub fn set_voxel_blend(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_voxel_blend(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_voxel_blend() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(1.0, |g| g.voxel_blend())
+    })
+}

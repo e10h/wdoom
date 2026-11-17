@@ -87,7 +87,7 @@ pub struct Vertex {
     pub light_uv: [f32; 2],
 }
 
-/// One instance of a voxel model in the world (24 bytes).
+/// One instance of a voxel model in the world (32 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable, Debug)]
 pub struct VoxelInstance {
@@ -95,6 +95,7 @@ pub struct VoxelInstance {
     pub sin_yaw: f32,
     pub cos_yaw: f32,
     pub light: f32,
+    pub light_uv: [f32; 2],
 }
 
 /// A collection of world instances sharing a single voxel model mesh.
@@ -284,15 +285,17 @@ unsafe fn fill_scene(
     cam_up: [f32; 3],
     actors: bool,
 ) -> (u32, u32) {
-    if let Some(atlas) = scratch.atlas.as_ref() {
+    let floor_light = if let Some(atlas) = scratch.atlas.as_ref() {
         push_sky(&mut scratch.verts, &mut scratch.indices, atlas, eye, ang);
         push_world(
             &mut scratch.verts,
             &mut scratch.indices,
             atlas,
             &scratch.flats,
-        );
-    }
+        )
+    } else {
+        Vec::new()
+    };
     // Build the weapon first into a side buffer so actors cannot spend the
     // vertex budget before the gun is added.
     let mut weapon_verts = Vec::new();
@@ -321,6 +324,7 @@ unsafe fn fill_scene(
                 right,
                 true,
                 actor_vert_limit,
+                &floor_light,
             );
         }
     }
@@ -335,6 +339,7 @@ unsafe fn fill_scene(
                 right,
                 false,
                 actor_vert_limit,
+                &floor_light,
             );
         }
     }
@@ -888,9 +893,9 @@ unsafe fn push_world(
     indices: &mut Vec<u32>,
     atlas: &Atlas,
     flats: &[Vec<[f32; 2]>],
-) {
+) -> Vec<Option<PolyLight>> {
     if segs.is_null() || subsectors.is_null() {
-        return;
+        return Vec::new();
     }
     // Planes reserve a rectangle before the walls are emitted. The packer
     // still scales every request together, so neither side can fill the map
@@ -943,6 +948,7 @@ unsafe fn push_world(
             ceil_light.get(i as usize).copied().flatten(),
         );
     }
+    floor_light
 }
 
 /// Encode the other sidedef's quad without changing vertices, UVs, or packing.
@@ -1412,6 +1418,7 @@ unsafe fn push_sprites(
     right: [f32; 3],
     voxels: bool,
     vert_limit: usize,
+    floor_light: &[Option<PolyLight>],
 ) {
     if sectors.is_null()
         || spritewidth.is_null()
@@ -1447,6 +1454,21 @@ unsafe fn push_sprites(
             } else if th.flags & MF_SHADOW != 0 {
                 light = 0.18;
             }
+            let light_uv = if !subsectors.is_null() {
+                let sub_addr = if !th.subsector.is_null() {
+                    th.subsector as usize
+                } else {
+                    crate::doom::r_main::R_PointInSubsector(th.x, th.y) as usize
+                };
+                if sub_addr != 0 {
+                    let sub_idx = sub_addr.wrapping_sub(subsectors as usize) / std::mem::size_of::<subsector_t>();
+                    floor_light.get(sub_idx).and_then(|&opt| opt).map(|pl| pl.uv(fx(th.x), fx(th.y))).unwrap_or([-1.0, -1.0])
+                } else {
+                    [-1.0, -1.0]
+                }
+            } else {
+                [-1.0, -1.0]
+            };
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
                     let yaw = (th.angle as f32) * std::f32::consts::TAU / 4294967296.0 + extra;
@@ -1456,6 +1478,7 @@ unsafe fn push_sprites(
                         sin_yaw: s,
                         cos_yaw: c,
                         light,
+                        light_uv,
                     };
                     if let Some(batch) = voxel_batches.iter_mut().find(|b| Arc::ptr_eq(&b.mesh, &mesh)) {
                         batch.instances.push(inst);
@@ -1475,7 +1498,7 @@ unsafe fn push_sprites(
             else {
                 continue;
             };
-            push_billboard(verts, indices, atlas, th, lump, flip, right, light, vert_limit);
+            push_billboard(verts, indices, atlas, th, lump, flip, right, light, light_uv, vert_limit);
         }
     }
 }
@@ -1490,6 +1513,7 @@ unsafe fn push_billboard(
     flip: bool,
     right: [f32; 3],
     light: f32,
+    light_uv: [f32; 2],
     vert_limit: usize,
 ) {
     if lump < 0 || lump as usize >= atlas.sprite_rects.len() {
@@ -1528,6 +1552,7 @@ unsafe fn push_billboard(
     );
     for v in &mut verts[start_vert..] {
         v._pad = 2.0;
+        v.light_uv = light_uv;
     }
 }
 

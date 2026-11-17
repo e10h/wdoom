@@ -110,6 +110,8 @@ struct Camera {
     fill: vec4<f32>,
     // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
+    // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked).
+    extra: vec4<f32>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -228,7 +230,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         let baked = textureLoad(light_tex, coord, 0);
         if (baked.a > 0.0) {
             let baked_rgb = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
-            let blend = clamp(camera.fill.y, 0.0, 1.0);
+            let blend = select(clamp(camera.fill.y, 0.0, 1.0), clamp(camera.extra.x, 0.0, 1.0), in.surface > 1.5);
             incoming = mix(doom_light, baked_rgb, blend);
         }
     }
@@ -284,11 +286,15 @@ struct VoxelInstanceInput {
     @location(3) sin_yaw: f32,
     @location(4) cos_yaw: f32,
     @location(5) light: f32,
+    @location(6) light_uv: vec2<f32>,
 };
 
 struct VoxelVertexOutput {
     @builtin(position) clip_position: vec4<f32>,
     @location(0) color: vec3<f32>,
+    @location(1) @interpolate(flat) light_uv: vec2<f32>,
+    @location(2) light: f32,
+    @location(3) view_dist: f32,
 };
 
 @vertex
@@ -300,16 +306,36 @@ fn vs_voxel(v: VoxelVertexInput, inst: VoxelInstanceInput) -> VoxelVertexOutput 
         inst.origin.z - inst.sin_yaw * v.pos.y + inst.cos_yaw * v.pos.x,
     );
     out.clip_position = camera.view_proj * vec4<f32>(world_pos, 1.0);
-    let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
-    let incoming = clamp(inst.light, camera.fill.x, ceiling);
-    let diminished = doom_diminish(vec3<f32>(incoming), out.clip_position.w, camera.pbr.w, camera.fill.x);
-    out.color = v.tint * diminished;
+    out.color = v.tint;
+    out.light_uv = inst.light_uv;
+    out.light = inst.light;
+    out.view_dist = out.clip_position.w;
     return out;
 }
 
 @fragment
 fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
-    return vec4<f32>(in.color, 1.0);
+    let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
+    var doom_light = doom_diminish(vec3<f32>(in.light), in.view_dist, camera.pbr.w, camera.fill.x);
+    doom_light = clamp(doom_light, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+
+    var incoming = doom_light;
+    if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
+        let dims = textureDimensions(light_tex);
+        let coord = clamp(
+            vec2<i32>(in.light_uv * vec2<f32>(dims)),
+            vec2<i32>(0),
+            vec2<i32>(dims) - vec2<i32>(1),
+        );
+        let baked = textureLoad(light_tex, coord, 0);
+        if (baked.a > 0.0) {
+            let baked_rgb = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
+            let blend = clamp(camera.extra.x, 0.0, 1.0);
+            incoming = mix(doom_light, baked_rgb, blend);
+        }
+    }
+    incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    return vec4<f32>(in.color * incoming, 1.0);
 }
 "#;
 
@@ -1045,6 +1071,8 @@ pub(crate) struct TraceSettings {
     pub(crate) diminish: f32,
     /// Blend between normal Doom lighting (0.0) and raytraced baked lighting (1.0).
     pub(crate) light_blend: f32,
+    /// Blend between normal Doom lighting (0.0) and raytraced baked lighting (1.0) for voxel/actor objects.
+    pub(crate) voxel_blend: f32,
 }
 
 impl Default for TraceSettings {
@@ -1076,6 +1104,7 @@ impl Default for TraceSettings {
             baked_light: true,
             diminish: 1.5,
             light_blend: 0.5,
+            voxel_blend: 1.0,
         }
     }
 }
@@ -1850,6 +1879,12 @@ impl GpuState {
                     self.trace.roughness_scale,
                     self.trace.specular_sheen,
                     self.trace.diminish,
+                ],
+                extra: [
+                    self.trace.voxel_blend,
+                    0.0,
+                    0.0,
+                    0.0,
                 ],
             };
             self.queue
@@ -2940,6 +2975,14 @@ impl GpuState {
         self.trace.light_blend = val.clamp(0.0, 1.0);
     }
 
+    pub fn voxel_blend(&self) -> f32 {
+        self.trace.voxel_blend
+    }
+
+    pub fn set_voxel_blend(&mut self, val: f32) {
+        self.trace.voxel_blend = val.clamp(0.0, 1.0);
+    }
+
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -3609,6 +3652,7 @@ struct WorldUniform {
     view_proj: [[f32; 4]; 4],
     fill: [f32; 4],
     pbr: [f32; 4],
+    extra: [f32; 4],
 }
 
 fn vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -3632,7 +3676,7 @@ const VOXEL_VERTEX_ATTRS: [wgpu::VertexAttribute; 2] = [
     },
 ];
 
-const VOXEL_INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = [
+const VOXEL_INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -3652,6 +3696,11 @@ const VOXEL_INSTANCE_ATTRS: [wgpu::VertexAttribute; 4] = [
         format: wgpu::VertexFormat::Float32,
         offset: 20,
         shader_location: 5,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x2,
+        offset: 24,
+        shader_location: 6,
     },
 ];
 

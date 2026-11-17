@@ -101,6 +101,10 @@ impl TraceUi {
                             .text("Bake / Doom blend"),
                     );
                     ui.add(
+                        egui::Slider::new(&mut controls.voxel_blend, 0.0..=1.0)
+                            .text("Object bake blend"),
+                    );
+                    ui.add(
                         egui::Slider::new(&mut controls.diminish, 0.0..=3.0)
                             .text("OG Doom diminishing"),
                     );
