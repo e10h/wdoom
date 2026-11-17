@@ -1003,6 +1003,10 @@ pub(crate) struct TraceSettings {
     pub(crate) roughness_scale: f32,
     /// Specular sheen and metallic luster intensity (0.0 = off, 1.0 = default).
     pub(crate) specular_sheen: f32,
+    /// Screen-Space Radiance Cascades for real-time secondary diffuse bounce.
+    pub(crate) ssrc: bool,
+    /// Multiplier for SSRC diffuse bounce irradiance (0.0 to 3.0).
+    pub(crate) ssrc_strength: f32,
 }
 
 impl Default for TraceSettings {
@@ -1030,6 +1034,8 @@ impl Default for TraceSettings {
             normal_strength: 1.0,
             roughness_scale: 1.0,
             specular_sheen: 1.0,
+            ssrc: true,
+            ssrc_strength: 1.0,
         }
     }
 }
@@ -1155,6 +1161,7 @@ pub struct GpuState {
     #[cfg(not(target_arch = "wasm32"))]
     nr_live: Option<neural::Live>,
     smaa_target: Option<(smaa::SmaaTarget, (u32, u32))>,
+    ssrc_pass: Option<ssrc::SsrcPass>,
     blit: BlitGpu,
     accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1567,6 +1574,7 @@ impl GpuState {
             ray_image: None,
             play_image: None,
             smaa_target: None,
+            ssrc_pass: None,
             #[cfg(not(target_arch = "wasm32"))]
             nr_live: None,
             blit,
@@ -2142,6 +2150,25 @@ impl GpuState {
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
             draw_overlays(&mut pass, world, scene);
             }
+            if self.trace.ssrc {
+                let image = self.ray_image.as_ref().expect("ray image");
+                if self.ssrc_pass.is_none() {
+                    self.ssrc_pass = Some(ssrc::SsrcPass::new(&self.device, self.config.format, rw, rh));
+                }
+                if let Some(ssrc) = self.ssrc_pass.as_mut() {
+                    ssrc.render(
+                        &mut encoder,
+                        &self.device,
+                        &self.queue,
+                        &image.display,
+                        &image.depth_view,
+                        &image.display,
+                        rw,
+                        rh,
+                        self.trace.ssrc_strength,
+                    );
+                }
+            }
             let image = self.ray_image.as_ref().expect("ray image");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_ray_blit"),
@@ -2204,6 +2231,25 @@ impl GpuState {
                 });
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
                 draw_scene(&mut pass, world, scene, false, msaa);
+            }
+            if self.trace.ssrc {
+                let image = self.play_image.as_ref().expect("play image");
+                if self.ssrc_pass.is_none() {
+                    self.ssrc_pass = Some(ssrc::SsrcPass::new(&self.device, self.config.format, rw, rh));
+                }
+                if let Some(ssrc) = self.ssrc_pass.as_mut() {
+                    ssrc.render(
+                        &mut encoder,
+                        &self.device,
+                        &self.queue,
+                        &image.view,
+                        &image.depth_view,
+                        &image.view,
+                        rw,
+                        rh,
+                        self.trace.ssrc_strength,
+                    );
+                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             let handled_by_nr = if nr_active {
@@ -2845,6 +2891,22 @@ impl GpuState {
 
     pub fn set_specular_sheen(&mut self, val: f32) {
         self.trace.specular_sheen = val.clamp(0.0, 5.0);
+    }
+
+    pub fn ssrc(&self) -> bool {
+        self.trace.ssrc
+    }
+
+    pub fn set_ssrc(&mut self, val: bool) {
+        self.trace.ssrc = val;
+    }
+
+    pub fn ssrc_strength(&self) -> f32 {
+        self.trace.ssrc_strength
+    }
+
+    pub fn set_ssrc_strength(&mut self, val: f32) {
+        self.trace.ssrc_strength = val.clamp(0.0, 3.0);
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -5966,6 +6028,8 @@ mod msaa_test;
 
 mod msaa;
 use msaa::{msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
+
+mod ssrc;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod linear_accum_test;

@@ -448,3 +448,35 @@ pub fn get_specular_sheen() -> f32 {
         gpu.as_ref().map_or(1.0, |g| g.specular_sheen())
     })
 }
+
+#[wasm_bindgen]
+pub fn set_ssrc(val: bool) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssrc(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn is_ssrc_enabled() -> bool {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(true, |g| g.ssrc())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_ssrc_strength(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_ssrc_strength(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
+pub fn get_ssrc_strength() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(1.0, |g| g.ssrc_strength())
+    })
+}

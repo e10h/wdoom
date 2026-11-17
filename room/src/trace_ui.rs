@@ -118,6 +118,16 @@ impl TraceUi {
                         .text("Specular / sheen"),
                 );
                 ui.separator();
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut controls.ssrc, "Radiance Cascades (SSRC)");
+                });
+                if controls.ssrc {
+                    ui.add(
+                        egui::Slider::new(&mut controls.ssrc_strength, 0.0..=2.5)
+                            .text("SSRC secondary bounce"),
+                    );
+                }
+                ui.separator();
                 ui.checkbox(&mut controls.smaa, "SMAA (0)");
                 ui.add_enabled(controls.playing(), egui::Checkbox::new(&mut controls.neural,"Neural preview (9)"));
                 if controls.neural {

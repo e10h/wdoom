@@ -1,4 +1,4 @@
-import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen } from './pkg/room.js';
+import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen, set_ssrc, is_ssrc_enabled, set_ssrc_strength, get_ssrc_strength } from './pkg/room.js';
 
 window.toggle_msaa = toggle_msaa;
 window.set_msaa = set_msaa;
@@ -13,12 +13,18 @@ window.set_roughness_scale = set_roughness_scale;
 window.get_roughness_scale = get_roughness_scale;
 window.set_specular_sheen = set_specular_sheen;
 window.get_specular_sheen = get_specular_sheen;
+window.set_ssrc = set_ssrc;
+window.is_ssrc_enabled = is_ssrc_enabled;
+window.set_ssrc_strength = set_ssrc_strength;
+window.get_ssrc_strength = get_ssrc_strength;
 
 const canvas = document.getElementById('doom-canvas');
 const status = document.getElementById('status');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
+const btnSsrc = document.getElementById('btn-ssrc');
 const btnClearVisible = document.getElementById('btn-clear-visible');
+const sliderSsrc = document.getElementById('slider-ssrc');
 const sliderNormal = document.getElementById('slider-normal');
 const sliderRoughness = document.getElementById('slider-roughness');
 
@@ -31,9 +37,32 @@ function updateButtonStates() {
     const smaaOn = is_smaa_enabled();
     btnSmaa.textContent = `SMAA: ${smaaOn ? 'ON' : 'OFF'}`;
     btnSmaa.classList.toggle('active', smaaOn);
+
+    if (btnSsrc) {
+      const ssrcOn = is_ssrc_enabled();
+      btnSsrc.textContent = `SSRC: ${ssrcOn ? 'ON' : 'OFF'}`;
+      btnSsrc.classList.toggle('active', ssrcOn);
+    }
   } catch (_) {
     // Before doom/GPU is initialized
   }
+}
+
+if (btnSsrc) {
+  btnSsrc.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const now = !is_ssrc_enabled();
+    set_ssrc(now);
+    updateButtonStates();
+    canvas.focus();
+  });
+}
+
+if (sliderSsrc) {
+  sliderSsrc.addEventListener('input', (e) => {
+    e.stopPropagation();
+    set_ssrc_strength(parseFloat(e.target.value));
+  });
 }
 
 if (btnMsaa) {
