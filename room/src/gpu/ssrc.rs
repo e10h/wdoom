@@ -143,13 +143,15 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 let depth_diff = z0 - zs;
                 let abs_depth = abs(depth_diff);
 
-                let hit_color = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
+                let hit_sample = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0);
+                let hit_color = hit_sample.rgb;
 
                 // Identify true fiery explosion cores:
                 // Explosions in Doom (SPR_BEXP, bexpa..bexpe) are blazing saturated orange-red flame:
                 // High red, moderate green, low blue, and high red-to-blue contrast.
                 // Normal ceiling lights and lamps are white/cyan/neutral with high blue (b > 0.35) or low r-b.
                 let is_explosion = hit_color.r > 0.70 && hit_color.g > 0.20 && hit_color.b < 0.22 && (hit_color.r - hit_color.b) > 0.50;
+                let is_drop = abs(hit_sample.a - 0.40) < 0.20;
 
                 if (is_explosion) {
                     // Explosions radiate light spherically across depth in 3D space.
@@ -161,6 +163,19 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                         let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
                         let falloff = 1.0 / (1.0 + dist_3d * 0.012);
                         ray_radiance = hit_color * emit_boost * falloff * edge_fade;
+                        hit_found = true;
+                        break;
+                    }
+                } else if (is_drop) {
+                    // Collectible drops & pickups: HIGH radiance radiating onto the environment!
+                    let max_emitter_depth = max(z0 * 0.8, 80.0);
+                    if (abs_depth < max_emitter_depth) {
+                        let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
+                        let rad_color = hit_color * (max(lum, 0.55) / max(lum, 0.001));
+                        let emit_boost = 14.0;
+                        let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
+                        let falloff = 1.0 / (1.0 + dist_3d * 0.010);
+                        ray_radiance = rad_color * emit_boost * falloff * edge_fade;
                         hit_found = true;
                         break;
                     }
