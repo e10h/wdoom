@@ -255,14 +255,18 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     }
     let roughness = clamp(pbr.b * camera.pbr.y, 0.02, 1.0);
     let metallic = pbr.a;
-    let shaded = albedo * incoming * bump;
+    var final_incoming = incoming;
+    if (is_drop) {
+        final_incoming = max(final_incoming, vec3<f32>(0.92));
+    }
+    let shaded = albedo * final_incoming * bump;
     let emission = max(
         textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r,
         select(0.0, in.light, is_explosion),
     );
     var radiance = max(shaded, albedo * emission);
     let sheen = (1.0 - roughness) * (metallic * 0.4 + 0.1) * camera.pbr.z;
-    radiance = mix(radiance, radiance * (1.0 + sheen * 0.4) + incoming * sheen * 0.15, metallic * 0.5 + 0.1);
+    radiance = mix(radiance, radiance * (1.0 + sheen * 0.4) + final_incoming * sheen * 0.15, metallic * 0.5 + 0.1);
     return vec4<f32>(radiance, select(1.0, 0.40, is_drop));
 }
 
@@ -368,6 +372,9 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     }
     if (is_explosion) {
         incoming = max(incoming, vec3<f32>(in.light));
+    }
+    if (is_drop) {
+        incoming = max(incoming, vec3<f32>(0.92));
     }
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     let lit_color = in.color * incoming;

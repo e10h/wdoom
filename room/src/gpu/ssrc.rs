@@ -167,14 +167,14 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                         break;
                     }
                 } else if (is_drop) {
-                    // Collectible drops & pickups: HIGH radiance radiating onto the environment!
-                    let max_emitter_depth = max(z0 * 0.8, 80.0);
-                    if (abs_depth < max_emitter_depth) {
+                    // Collectible drops & pickups: local radiant glow on immediately adjacent surfaces (floor & nearby walls)
+                    let max_emitter_depth = 35.0;
+                    if (abs_depth < max_emitter_depth && dist < 45.0) {
                         let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
-                        let rad_color = hit_color * (max(lum, 0.55) / max(lum, 0.001));
-                        let emit_boost = 14.0;
-                        let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
-                        let falloff = 1.0 / (1.0 + dist_3d * 0.010);
+                        let rad_color = hit_color * (max(lum, 0.80) / max(lum, 0.001));
+                        let emit_boost = 6.0;
+                        let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.5);
+                        let falloff = 1.0 / (1.0 + (dist_3d / 12.0) * (dist_3d / 12.0));
                         ray_radiance = rad_color * emit_boost * falloff * edge_fade;
                         hit_found = true;
                         break;
