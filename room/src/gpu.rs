@@ -106,7 +106,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 const WORLD_SHADER: &str = r#"
 struct Camera {
     view_proj: mat4x4<f32>,
-    // x: minimum incoming light; y: emission strength; z: display ceiling; w: bypass bake (1.0 = bypass, 0.0 = use bake).
+    // x: minimum incoming light; y: bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked); z: display ceiling; w: bypass bake (1.0 = bypass, 0.0 = use bake).
     fill: vec4<f32>,
     // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
@@ -213,7 +213,9 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     if (color.a < 0.5) {
         discard;
     }
-    var incoming = vec3<f32>(in.light);
+    var doom_light = vec3<f32>(in.light);
+    doom_light = doom_diminish(doom_light, in.view_dist, camera.pbr.w, camera.fill.x);
+    var incoming = doom_light;
     if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
         let dims = textureDimensions(light_tex);
         let coord = clamp(
@@ -225,12 +227,13 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         // empty texels; keep sector lighting there instead of painting black.
         let baked = textureLoad(light_tex, coord, 0);
         if (baked.a > 0.0) {
-            incoming = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
+            let baked_rgb = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
+            let blend = clamp(camera.fill.y, 0.0, 1.0);
+            incoming = mix(doom_light, baked_rgb, blend);
         }
     }
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
-    incoming = doom_diminish(incoming, in.view_dist, camera.pbr.w, camera.fill.x);
     let albedo = color.rgb * in.tint;
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
@@ -1040,6 +1043,8 @@ pub(crate) struct TraceSettings {
     pub(crate) baked_light: bool,
     /// OG Doom distance light diminishing (0.0 = flat/disabled, 1.0 = classic hyperbolic falloff).
     pub(crate) diminish: f32,
+    /// Blend between normal Doom lighting (0.0) and raytraced baked lighting (1.0).
+    pub(crate) light_blend: f32,
 }
 
 impl Default for TraceSettings {
@@ -1070,6 +1075,7 @@ impl Default for TraceSettings {
             bounce_boost: 1.8,
             baked_light: true,
             diminish: 1.0,
+            light_blend: 0.5,
         }
     }
 }
@@ -1835,7 +1841,7 @@ impl GpuState {
                 view_proj: scene.view_proj,
                 fill: [
                     self.trace.min_light,
-                    self.trace.emission,
+                    self.trace.light_blend,
                     self.trace.max_light,
                     if self.trace.baked_light { 0.0 } else { 1.0 },
                 ],
@@ -2924,6 +2930,14 @@ impl GpuState {
 
     pub fn set_diminish(&mut self, val: f32) {
         self.trace.diminish = val.clamp(0.0, 2.0);
+    }
+
+    pub fn light_blend(&self) -> f32 {
+        self.trace.light_blend
+    }
+
+    pub fn set_light_blend(&mut self, val: f32) {
+        self.trace.light_blend = val.clamp(0.0, 1.0);
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
