@@ -207,14 +207,16 @@ fn evaluate_light_probes(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
         if (dist2 < radius * radius && dist2 > 0.0001) {
             let dist = sqrt(dist2);
             let L = delta / dist;
-            var ndl = max(dot(n, L), 0.0);
-
             let dir_bias = probe.color_dir.w;
+            var ndl = max(dot(n, L), 0.0);
             if (dir_bias > 0.5) {
                 // Light from open barrel emits upward and outward into upper hemisphere (+Y)
                 let emit_up = -L.y;
                 let cone = clamp(emit_up * 1.5 + 0.1, 0.0, 1.0);
                 ndl = ndl * cone;
+            } else {
+                // Omnidirectional explosions: wrap lighting so glancing and side surfaces receive radiant bounce
+                ndl = max(dot(n, L) * 0.75 + 0.25, 0.0);
             }
 
             let atten = clamp(1.0 - dist / radius, 0.0, 1.0);
