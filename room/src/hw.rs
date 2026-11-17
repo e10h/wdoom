@@ -14,8 +14,8 @@ use crate::doom::d_player::{consoleplayer, players, PspdefT, MAXPLAYERS, NUMPSPR
 use crate::doom::i_video::{hw_palette_rgb, SCREENHEIGHT, SCREENWIDTH};
 use crate::doom::info::{
     State, MF_DROPPED, MF_SPECIAL, SPR_ARM1, SPR_ARM2, SPR_BAR1, SPR_BEXP, SPR_BFE1, SPR_BFE2,
-    SPR_BFS1, SPR_BON1, SPR_BON2, SPR_MEGA, SPR_MISL, SPR_PINV, SPR_PLSE, SPR_PLSS,
-    SPR_PSTR, SPR_SOUL,
+    SPR_BFS1, SPR_BON1, SPR_BON2, SPR_MEDI, SPR_MEGA, SPR_MISL, SPR_PINV, SPR_PLSE, SPR_PLSS,
+    SPR_PSTR, SPR_SOUL, SPR_STIM,
 };
 use crate::doom::m_menu::menuactive;
 use crate::doom::p_setup::{
@@ -122,7 +122,7 @@ pub struct HaloInstance {
     pub color: [f32; 4],
 }
 
-pub const MAX_LIGHT_PROBES: usize = 16;
+pub const MAX_LIGHT_PROBES: usize = 64;
 
 /// A dynamic 3D light probe emitting directional radiance into the scene.
 #[repr(C)]
@@ -354,6 +354,7 @@ unsafe fn fill_scene(
     cam_up: [f32; 3],
     actors: bool,
 ) -> (u32, u32) {
+    collect_light_probes(&mut scratch.light_probes, eye);
     let floor_light = if let Some(atlas) = scratch.atlas.as_ref() {
         push_sky(&mut scratch.verts, &mut scratch.indices, atlas, eye, ang);
         push_world(
@@ -1490,92 +1491,153 @@ unsafe fn push_thing_halos(_th: &mobj_t, _sector: &sector_t, _halos: &mut Vec<Ha
     // All emissive items, barrels, and explosions are illuminated via 3D normal-aware light probes
 }
 
+/// Computes light probe parameters for an emissive thing:
+/// (priority, radius, color, dir_bias, emitter_dy)
+/// Lower priority value = higher precedence in probe allocation.
+pub(crate) unsafe fn thing_probe_params(th: &mobj_t) -> Option<(u8, f32, [f32; 3], f32, f32)> {
+    let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
+    if th.sprite == SPR_BEXP {
+        // Barrel explosion: expanding blazing fireball (Priority 0)
+        let (radius, color) = match frame_idx {
+            0 => (220.0, [12.0, 9.5, 4.5]),
+            1 => (300.0, [10.0, 7.0, 2.5]),
+            2 => (360.0, [7.5, 4.5, 1.2]),
+            3 => (380.0, [4.5, 2.2, 0.4]),
+            _ => (400.0, [2.2, 0.9, 0.15]),
+        };
+        Some((0, radius, color, 0.0, 20.0))
+    } else if th.sprite == SPR_MISL {
+        if frame_idx == 0 {
+            Some((0, 45.0, [2.2, 1.5, 0.5], 0.0, 16.0))
+        } else {
+            let (radius, color) = match frame_idx {
+                1 => (220.0, [10.0, 8.0, 3.5]),
+                2 => (300.0, [7.5, 4.8, 1.5]),
+                _ => (350.0, [4.5, 2.0, 0.4]),
+            };
+            Some((0, radius, color, 0.0, 20.0))
+        }
+    } else if th.sprite == SPR_PLSS {
+        Some((0, 50.0, [0.5, 1.2, 2.8], 0.0, 16.0))
+    } else if th.sprite == SPR_PLSE {
+        Some((0, 160.0, [1.0, 2.8, 5.0], 0.0, 20.0))
+    } else if th.sprite == SPR_BFS1 {
+        Some((0, 140.0, [0.8, 3.5, 1.2], 0.0, 20.0))
+    } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
+        Some((0, 480.0, [2.0, 12.0, 4.0], 0.0, 24.0))
+    } else if th.sprite == SPR_BAR1 {
+        // Toxic barrel: radioactive green radiance emitting upward and outward from top rim
+        Some((0, 95.0, [0.10, 0.90, 0.20], 1.0, 38.0))
+    } else if th.sprite == SPR_ARM1 {
+        // Green armor: pulses/flickers with its fullbright animation frame (Priority 1)
+        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
+        let color = if is_bright {
+            [0.30, 2.20, 0.50]
+        } else {
+            [0.15, 1.10, 0.25]
+        };
+        Some((1, 55.0, color, 0.0, 10.0))
+    } else if th.sprite == SPR_ARM2 {
+        // Blue MegaArmor: pulses/flickers with its fullbright animation frame (Priority 1)
+        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
+        let color = if is_bright {
+            [0.25, 0.80, 2.40]
+        } else {
+            [0.12, 0.40, 1.20]
+        };
+        Some((1, 55.0, color, 0.0, 10.0))
+    } else if th.sprite == SPR_SOUL {
+        // Soul sphere: radiant pulsing ethereal blue sphere
+        Some((1, 70.0, [0.40, 1.20, 3.0], 0.0, 16.0))
+    } else if th.sprite == SPR_MEGA {
+        // Megasphere: pulsing radiant golden energy
+        Some((1, 75.0, [2.5, 2.0, 0.6], 0.0, 16.0))
+    } else if th.sprite == SPR_PINV {
+        // Invulnerability: pulsing radiant fiery amber
+        Some((1, 70.0, [2.5, 1.4, 0.35], 0.0, 16.0))
+    } else if th.sprite == SPR_PSTR {
+        // Berserk: crimson adrenaline glow
+        Some((1, 50.0, [2.0, 0.40, 0.25], 0.0, 10.0))
+    } else if th.sprite == SPR_BON1 {
+        // Health potion: magical blue halo on floor and pedestal (Priority 2)
+        Some((2, 38.0, [0.25, 0.65, 1.80], 0.0, 8.0))
+    } else if th.sprite == SPR_BON2 {
+        // Armor bonus: emerald green halo on floor and pedestal (Priority 2)
+        Some((2, 38.0, [0.25, 1.60, 0.45], 0.0, 8.0))
+    } else if th.sprite == SPR_STIM {
+        Some((2, 32.0, [1.10, 0.30, 0.25], 0.0, 8.0))
+    } else if th.sprite == SPR_MEDI {
+        Some((2, 35.0, [1.30, 0.35, 0.30], 0.0, 8.0))
+    } else {
+        None
+    }
+}
+
 pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbeBuffer) {
     if probes.meta[0] as usize >= MAX_LIGHT_PROBES {
         return;
     }
-    let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
-    let (radius, color, dir_bias): (f32, [f32; 3], f32) = if th.sprite == SPR_BAR1 {
-        // Toxic barrel: radioactive green radiance emitting upward and outward from top rim
-        (85.0, [0.08, 0.70, 0.16], 1.0)
-    } else if th.sprite == SPR_BEXP {
-        // Barrel explosion: expanding blazing fireball
-        match frame_idx {
-            0 => (180.0, [9.0, 7.5, 3.5], 0.0),
-            1 => (260.0, [8.0, 5.5, 1.8], 0.0),
-            2 => (320.0, [6.0, 3.5, 0.8], 0.0),
-            3 => (340.0, [3.8, 1.8, 0.3], 0.0),
-            _ => (360.0, [1.8, 0.7, 0.1], 0.0),
-        }
-    } else if th.sprite == SPR_MISL {
-        if frame_idx == 0 {
-            (42.0, [1.8, 1.2, 0.4], 0.0)
-        } else {
-            match frame_idx {
-                1 => (200.0, [8.0, 6.5, 2.8], 0.0),
-                2 => (280.0, [6.0, 3.8, 1.2], 0.0),
-                _ => (320.0, [3.5, 1.6, 0.3], 0.0),
+    if let Some((_prio, radius, color, dir_bias, emitter_dy)) = thing_probe_params(th) {
+        let idx = probes.meta[0] as usize;
+        probes.probes[idx] = LightProbe {
+            pos_radius: [fx(th.x), fx(th.z) + emitter_dy, -fx(th.y), radius],
+            color_dir: [color[0], color[1], color[2], dir_bias],
+        };
+        probes.meta[0] += 1;
+    }
+}
+
+struct ProbeCandidate {
+    priority: u8,
+    dist_sq: f32,
+    probe: LightProbe,
+}
+
+pub(crate) unsafe fn collect_light_probes(probes: &mut LightProbeBuffer, eye: [f32; 3]) {
+    *probes = LightProbeBuffer::default();
+    if sectors.is_null() {
+        return;
+    }
+    let mut candidates: Vec<ProbeCandidate> = Vec::new();
+    for i in 0..numsectors.max(0) as usize {
+        let sector = &*sectors.add(i);
+        let mut thing = sector.thinglist as *mut mobj_t;
+        let mut guard = 0;
+        while !thing.is_null() && guard < 4096 {
+            guard += 1;
+            let th = &*thing;
+            thing = th.snext;
+            if let Some((priority, radius, color, dir_bias, emitter_dy)) = thing_probe_params(th) {
+                let emitter_x = fx(th.x);
+                let emitter_y = fx(th.z) + emitter_dy;
+                let emitter_z = -fx(th.y);
+                let dx = emitter_x - eye[0];
+                let dy = emitter_y - eye[1];
+                let dz = emitter_z - eye[2];
+                let dist_sq = dx * dx + dy * dy + dz * dz;
+                candidates.push(ProbeCandidate {
+                    priority,
+                    dist_sq,
+                    probe: LightProbe {
+                        pos_radius: [emitter_x, emitter_y, emitter_z, radius],
+                        color_dir: [color[0], color[1], color[2], dir_bias],
+                    },
+                });
             }
         }
-    } else if th.sprite == SPR_PLSS {
-        (42.0, [0.4, 0.9, 2.0], 0.0)
-    } else if th.sprite == SPR_PLSE {
-        (130.0, [0.8, 2.2, 4.0], 0.0)
-    } else if th.sprite == SPR_BFS1 {
-        (110.0, [0.6, 2.5, 0.8], 0.0)
-    } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
-        (420.0, [1.5, 9.0, 3.0], 0.0)
-    } else if th.sprite == SPR_ARM1 {
-        // Green armor: pulses/flickers with its fullbright animation frame
-        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
-        if is_bright {
-            (56.0, [0.20, 1.50, 0.40], 0.0)
-        } else {
-            (38.0, [0.08, 0.50, 0.15], 0.0)
-        }
-    } else if th.sprite == SPR_ARM2 {
-        // Blue MegaArmor: pulses/flickers with its fullbright animation frame
-        let is_bright = (th.frame & FF_FULLBRIGHT) != 0;
-        if is_bright {
-            (56.0, [0.20, 0.60, 1.80], 0.0)
-        } else {
-            (38.0, [0.08, 0.22, 0.65], 0.0)
-        }
-    } else if th.sprite == SPR_SOUL {
-        // Soul sphere: radiant pulsing ethereal blue sphere
-        (72.0, [0.30, 0.80, 2.2], 0.0)
-    } else if th.sprite == SPR_MEGA {
-        // Megasphere: pulsing radiant golden energy
-        (75.0, [1.6, 1.3, 0.45], 0.0)
-    } else if th.sprite == SPR_PINV {
-        // Invulnerability: pulsing radiant fiery amber
-        (70.0, [1.6, 0.9, 0.25], 0.0)
-    } else if th.sprite == SPR_PSTR {
-        // Berserk: crimson adrenaline glow
-        (45.0, [1.4, 0.25, 0.15], 0.0)
-    } else if th.sprite == SPR_BON1 {
-        // Health potion: small magical blue sparkle
-        (26.0, [0.15, 0.40, 1.10], 0.0)
-    } else if th.sprite == SPR_BON2 {
-        // Armor bonus: small green sparkle
-        (26.0, [0.15, 1.10, 0.30], 0.0)
-    } else {
-        return;
-    };
+    }
 
-    let idx = probes.meta[0] as usize;
-    let emitter_y = if th.sprite == SPR_BAR1 {
-        fx(th.z) + 38.0
-    } else if th.sprite == SPR_BEXP || th.sprite == SPR_MISL || th.sprite == SPR_PLSS || th.sprite == SPR_PLSE || th.sprite == SPR_BFS1 || th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
-        fx(th.z) + 16.0
-    } else {
-        fx(th.z) + 14.0
-    };
-    probes.probes[idx] = LightProbe {
-        pos_radius: [fx(th.x), emitter_y, -fx(th.y), radius],
-        color_dir: [color[0], color[1], color[2], dir_bias],
-    };
-    probes.meta[0] += 1;
+    candidates.sort_unstable_by(|a, b| {
+        a.priority
+            .cmp(&b.priority)
+            .then_with(|| a.dist_sq.partial_cmp(&b.dist_sq).unwrap_or(std::cmp::Ordering::Equal))
+    });
+
+    let count = candidates.len().min(MAX_LIGHT_PROBES);
+    for (idx, cand) in candidates.iter().take(count).enumerate() {
+        probes.probes[idx] = cand.probe;
+    }
+    probes.meta[0] = count as u32;
 }
 
 unsafe fn push_sprites(
@@ -1583,7 +1645,7 @@ unsafe fn push_sprites(
     indices: &mut Vec<u32>,
     voxel_batches: &mut Vec<VoxelBatch>,
     halos: &mut Vec<HaloInstance>,
-    probes: &mut LightProbeBuffer,
+    _probes: &mut LightProbeBuffer,
     atlas: &Atlas,
     right: [f32; 3],
     voxels: bool,
@@ -1619,12 +1681,18 @@ unsafe fn push_sprites(
                 continue;
             }
             let mut light = (sector.lightlevel as f32 / 255.0).clamp(0.04, 1.0);
-            if th.sprite == SPR_BEXP || th.sprite == SPR_MISL || th.sprite == SPR_PLSE {
-                light = 3.5;
+            if th.sprite == SPR_BEXP
+                || th.sprite == SPR_MISL
+                || th.sprite == SPR_PLSE
+                || th.sprite == SPR_BFS1
+                || th.sprite == SPR_BFE1
+                || th.sprite == SPR_BFE2
+            {
+                light = 4.0;
             } else if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
                 // Collectible pickups and dropped items: encode drop tag by adding 2.0
                 let base_light = if th.frame & FF_FULLBRIGHT != 0 { 1.0 } else { light };
-                light = base_light + 2.0;
+                light = 2.0 + base_light;
             } else if th.frame & FF_FULLBRIGHT != 0 {
                 light = 1.0;
             } else if th.flags & MF_SHADOW != 0 {
@@ -1647,7 +1715,6 @@ unsafe fn push_sprites(
             };
             if voxels {
                 push_thing_halos(th, sector, halos);
-                push_thing_light_probe(th, probes);
             }
             if let Some((mesh, extra)) = voxel::model_for(th.sprite, th.frame, leveltime) {
                 if voxels {
@@ -2655,5 +2722,40 @@ mod tests {
         assert_eq!(probe_buf.meta[0], 1);
         let arm_dim = probe_buf.probes[0];
         assert!(arm_dim.color_dir[1] < arm_bright.color_dir[1]); // dimmer when not fullbright
+
+        // Armor bonus helmet: emits normal-aware light probe halo
+        probe_buf = super::LightProbeBuffer::default();
+        th.sprite = crate::doom::info::SPR_BON2;
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        assert!(probe_buf.probes[0].pos_radius[3] >= 35.0); // wide soft halo radius
+        assert!(probe_buf.probes[0].color_dir[1] > 1.0); // visible green glow
+    }
+
+    #[test]
+    fn probe_candidate_prioritization() {
+        use crate::doom::info::{SPR_ARM1, SPR_BAR1, SPR_BEXP, SPR_BON2};
+        use crate::doom::p_telept::mobj_t;
+
+        let mut th_exp: mobj_t = unsafe { std::mem::zeroed() };
+        th_exp.sprite = SPR_BEXP;
+        th_exp.frame = 0;
+        let p_exp = unsafe { super::thing_probe_params(&th_exp).unwrap() };
+        assert_eq!(p_exp.0, 0); // highest priority
+
+        let mut th_bar: mobj_t = unsafe { std::mem::zeroed() };
+        th_bar.sprite = SPR_BAR1;
+        let p_bar = unsafe { super::thing_probe_params(&th_bar).unwrap() };
+        assert_eq!(p_bar.0, 0); // barrel is priority 0
+
+        let mut th_arm: mobj_t = unsafe { std::mem::zeroed() };
+        th_arm.sprite = SPR_ARM1;
+        let p_arm = unsafe { super::thing_probe_params(&th_arm).unwrap() };
+        assert_eq!(p_arm.0, 1); // super pickup
+
+        let mut th_bon: mobj_t = unsafe { std::mem::zeroed() };
+        th_bon.sprite = SPR_BON2;
+        let p_bon = unsafe { super::thing_probe_params(&th_bon).unwrap() };
+        assert_eq!(p_bon.0, 2); // bonus item
     }
 }

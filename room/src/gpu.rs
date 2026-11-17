@@ -119,7 +119,7 @@ struct Camera {
     // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked).
     extra: vec4<f32>,
     probe_meta: vec4<u32>,
-    probes: array<LightProbe, 16>,
+    probes: array<LightProbe, 64>,
 };
 
 @group(0) @binding(0) var<uniform> camera: Camera;
@@ -198,7 +198,7 @@ fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
 
 fn evaluate_light_probes(world_pos: vec3<f32>, n: vec3<f32>) -> vec3<f32> {
     var irr = vec3<f32>(0.0);
-    let count = min(camera.probe_meta.x, 16u);
+    let count = min(camera.probe_meta.x, 64u);
     for (var i = 0u; i < count; i = i + 1u) {
         let probe = camera.probes[i];
         let delta = probe.pos_radius.xyz - world_pos;
@@ -277,8 +277,8 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
             incoming = mix(doom_light, baked_final, blend);
         }
     }
-    let is_drop = in.surface > 1.5 && in.light > 2.0;
-    let is_explosion = in.surface > 1.5 && in.light > 1.8 && !is_drop;
+    let is_drop = in.surface > 1.5 && in.light > 1.9 && in.light <= 3.05;
+    let is_explosion = in.surface > 1.5 && in.light > 3.05;
     let actual_light = select(in.light, in.light - 2.0, is_drop);
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     let obj_ceiling = select(1.0, max(ceiling, actual_light), in.surface <= 1.5 || is_explosion);
@@ -288,7 +288,12 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     if (dot(geom_n, view_dir) < 0.0) {
         geom_n = -geom_n;
     }
-    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n);
+    if (!is_drop) {
+        incoming = incoming + evaluate_light_probes(in.world_pos, geom_n);
+    }
+    if (!is_explosion && in.surface > 1.5) {
+        incoming = min(incoming, vec3<f32>(1.25));
+    }
     let albedo = color.rgb * in.tint;
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
@@ -301,7 +306,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let metallic = pbr.a;
     var final_incoming = incoming;
     if (is_drop) {
-        final_incoming = max(final_incoming, vec3<f32>(0.65));
+        final_incoming = clamp(final_incoming, vec3<f32>(0.65), vec3<f32>(1.05));
     }
     let shaded = albedo * final_incoming * bump;
     let emission = max(
@@ -311,7 +316,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     var radiance = max(shaded, albedo * emission);
     let sheen = (1.0 - roughness) * (metallic * 0.4 + 0.1) * camera.pbr.z;
     radiance = mix(radiance, radiance * (1.0 + sheen * 0.4) + final_incoming * sheen * 0.15, metallic * 0.5 + 0.1);
-    return vec4<f32>(radiance, select(1.0, 0.40, is_drop));
+    return vec4<f32>(radiance, 1.0);
 }
 
 @fragment
@@ -333,10 +338,7 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     let shaded = albedo * incoming;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
     let radiance = max(shaded, albedo * emission);
-    let is_drop = in.light > 1.9 && in.light < 3.0;
-    let is_explosion = in.light >= 3.0;
-    let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
-    return vec4<f32>(radiance, out_alpha);
+    return vec4<f32>(radiance, 1.0);
 }
 
 struct VoxelVertexInput {
@@ -386,8 +388,8 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     let len2 = dot(cross_p, cross_p);
     let geom_n = select(vec3<f32>(0.0, 1.0, 0.0), cross_p * inverseSqrt(len2), len2 > 1e-8);
     // Directional shading for solid objects; self-luminous explosions emit uniformly.
-    let is_drop = in.light > 1.9 && in.light < 3.0;
-    let is_explosion = in.light >= 3.0;
+    let is_drop = in.light > 1.9 && in.light <= 3.05;
+    let is_explosion = in.light > 3.05;
     let actual_light = select(in.light, in.light - 2.0, is_drop);
     let shade = select(clamp(0.80 + 0.20 * geom_n.y + 0.05 * geom_n.x, 0.65, 1.0), 1.0, is_explosion);
 
@@ -421,12 +423,17 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
         incoming = max(incoming, vec3<f32>(in.light));
     }
     if (is_drop) {
-        incoming = max(incoming, vec3<f32>(0.65));
+        incoming = clamp(incoming, vec3<f32>(0.65), vec3<f32>(1.05));
     }
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
-    incoming = incoming + evaluate_light_probes(in.world_pos, geom_n) * shade;
+    if (!is_drop) {
+        incoming = incoming + evaluate_light_probes(in.world_pos, geom_n) * shade;
+    }
+    if (!is_explosion) {
+        incoming = min(incoming, vec3<f32>(1.25));
+    }
     let lit_color = in.color * incoming;
-    let out_alpha = select(select(1.0, 0.40, is_drop), 0.20, is_explosion);
+    let out_alpha = select(1.0, 0.20, is_explosion);
     return vec4<f32>(lit_color, out_alpha);
 }
 "#;
