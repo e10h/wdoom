@@ -2909,6 +2909,11 @@ impl GpuState {
         self.trace.ssrc = val;
     }
 
+    pub(crate) fn toggle_ssrc(&mut self) -> bool {
+        self.trace.ssrc = !self.trace.ssrc;
+        self.trace.ssrc
+    }
+
     pub fn ssrc_strength(&self) -> f32 {
         self.trace.ssrc_strength
     }

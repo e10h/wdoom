@@ -95,7 +95,7 @@ impl TraceUi {
                     "Walk the empty map to fill light. Enemies are frozen and cannot hurt you."
                 });
                 if controls.playing() {
-                    ui.checkbox(&mut controls.baked_light, "Baked light (8 or F6)");
+                    ui.checkbox(&mut controls.baked_light, "Baked light ([ or F6)");
                 }
                 ui.add(
                     egui::Slider::new(&mut controls.min_light, 0.0..=1.0)
@@ -122,7 +122,7 @@ impl TraceUi {
                 );
                 ui.separator();
                 ui.horizontal(|ui| {
-                    ui.checkbox(&mut controls.ssrc, "Radiance Cascades (SSRC)");
+                    ui.checkbox(&mut controls.ssrc, "Radiance Cascades (SSRC) (] or F5)");
                 });
                 if controls.ssrc {
                     ui.add(

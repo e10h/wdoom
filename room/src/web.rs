@@ -459,6 +459,13 @@ pub fn set_ssrc(val: bool) {
 }
 
 #[wasm_bindgen]
+pub fn toggle_ssrc() -> bool {
+    GPU.with_borrow_mut(|gpu| {
+        gpu.as_mut().map_or(true, |g| g.toggle_ssrc())
+    })
+}
+
+#[wasm_bindgen]
 pub fn is_ssrc_enabled() -> bool {
     GPU.with_borrow(|gpu| {
         gpu.as_ref().map_or(true, |g| g.ssrc())

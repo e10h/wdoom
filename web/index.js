@@ -123,7 +123,13 @@ if (sliderRoughness) {
 }
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === '0') {
+  if (e.key === 'F5' || e.key === ']') {
+    e.preventDefault();
+    setTimeout(updateButtonStates, 10);
+  } else if (e.key === 'F6' || e.key === '[') {
+    e.preventDefault();
+    setTimeout(updateButtonStates, 10);
+  } else if (e.key === '0') {
     setTimeout(updateButtonStates, 10);
   } else if (e.key === '\\' || e.key === 'F7') {
     setTimeout(updateButtonStates, 10);
