@@ -623,7 +623,7 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
 
 // A soft beam from the camera. `cam.up.w` is its strength. The shadow ray is
 // skipped for the surface we can already see.
-fn flashlight(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, check_shadow: bool) -> vec3<f32> {
+fn flashlight(pos: vec3<f32>, n: vec3<f32>, check_shadow: bool) -> vec3<f32> {
     let amount = cam.up.w;
     if (amount <= 0.0) {
         return vec3<f32>(0.0);
@@ -635,10 +635,6 @@ fn flashlight(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, check_shadow: boo
     }
     let dist = sqrt(dist2);
     let l = to_eye / dist;
-    let geom_ndl = dot(geom_n, l);
-    if (geom_ndl <= 0.0) {
-        return vec3<f32>(0.0);
-    }
     let ndl = max(dot(n, l), 0.0);
     let spot = max(dot(-l, cam.forward.xyz), 0.0);
     let cone = spot * spot * spot * spot;
@@ -646,7 +642,7 @@ fn flashlight(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, check_shadow: boo
         return vec3<f32>(0.0);
     }
     if (check_shadow) {
-        let blocker = trace(pos + geom_n * RAY_BIAS, l);
+        let blocker = trace(pos + n * RAY_BIAS, l);
         if (blocker.hit && !blocker.sky && distance(blocker.pos, pos) + 0.5 < dist) {
             return vec3<f32>(0.0);
         }
@@ -657,7 +653,7 @@ fn flashlight(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, check_shadow: boo
 
 // Sample one dedicated source: work is independent of the fixture count.
 // Intensity is inverse-square, radius softens both shadows and near-field light.
-fn fixture_light(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, rng: ptr<function, u32>, first: u32, count: u32) -> vec3<f32> {
+fn fixture_light(pos: vec3<f32>, n: vec3<f32>, rng: ptr<function, u32>, first: u32, count: u32) -> vec3<f32> {
     if (count == 0u) { return vec3<f32>(0.0); }
     let index = first + min(u32(rand(rng) * f32(count)), count - 1u);
     let source = cam.fixtures.lights[index];
@@ -690,11 +686,9 @@ fn fixture_light(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, rng: ptr<funct
     if (dist2 < 0.01) { return vec3<f32>(0.0); }
     let dist = sqrt(dist2);
     let direction = delta / dist;
-    let geom_ndl = dot(geom_n, direction);
-    if (geom_ndl <= 0.0) { return vec3<f32>(0.0); }
     let ndl = max(dot(n, direction), 0.0);
     if (ndl <= 0.0) { return vec3<f32>(0.0); }
-    let blocker = trace(pos + geom_n * RAY_BIAS, direction);
+    let blocker = trace(pos + n * RAY_BIAS, direction);
     if (blocker.hit && !blocker.sky && distance(blocker.pos, pos) < dist - 2.0 * RAY_BIAS) {
         return vec3<f32>(0.0);
     }
@@ -705,16 +699,12 @@ fn fixture_light(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>, rng: ptr<funct
 }
 
 // One shadow ray. The sky sphere is the only thing that counts as the sun.
-fn sun_ndotl(pos: vec3<f32>, n: vec3<f32>, geom_n: vec3<f32>) -> f32 {
-    let geom_ndl = dot(geom_n, SUN_TO);
-    if (geom_ndl <= 0.0) {
-        return 0.0;
-    }
+fn sun_ndotl(pos: vec3<f32>, n: vec3<f32>) -> f32 {
     let ndl = dot(n, SUN_TO);
     if (ndl <= 0.0) {
         return 0.0;
     }
-    let blocker = trace(pos + geom_n * RAY_BIAS, SUN_TO);
+    let blocker = trace(pos + n * RAY_BIAS, SUN_TO);
     if (blocker.sky) {
         return ndl;
     }
@@ -811,11 +801,11 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                 // At most two shadow rays per bounce, never one per lamp.
                 if (s == 0u) {
                     let points = cam.fixtures.counts.z;
-                    let bulbs = fixture_light(surf.pos, surf.n, surf.geom_n, &rng, 0u, points);
-                    let panels = fixture_light(surf.pos, surf.n, surf.geom_n, &rng, points, cam.fixtures.counts.x - points);
+                    let bulbs = fixture_light(surf.pos, surf.geom_n, &rng, 0u, points);
+                    let panels = fixture_light(surf.pos, surf.geom_n, &rng, points, cam.fixtures.counts.x - points);
                     incoming += throughput * shade * (bulbs + panels) * f32(SAMPLES);
                 }
-                let ndl = sun_ndotl(surf.pos, surf.n, surf.geom_n);
+                let ndl = sun_ndotl(surf.pos, surf.geom_n);
                 if (ndl > 0.0) {
                     incoming += throughput * shade * SUN_RGB * ndl * env_scale;
                 }
@@ -825,7 +815,7 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                     let facing = max(surf.geom_n.y, 0.0) * 0.5 + 0.25;
                     incoming += throughput * shade * sky_light(vec3<f32>(0.0, 1.0, 0.0)) * facing * env_scale;
                 }
-                let beam = flashlight(surf.pos, surf.n, surf.geom_n, bounce > 0);
+                let beam = flashlight(surf.pos, surf.geom_n, bounce > 0);
                 if (beam.x > 0.0) {
                     incoming += throughput * shade * beam;
                 }
@@ -835,10 +825,7 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                 if (bounce > 0) {
                     throughput = throughput * surf.albedo;
                 }
-                dir = hemisphere(surf.n, &rng);
-                if (dot(dir, surf.geom_n) <= 0.0) {
-                    dir = normalize(dir + surf.geom_n * (abs(dot(dir, surf.geom_n)) + 0.1));
-                }
+                dir = hemisphere(surf.geom_n, &rng);
                 let next = trace(surf.pos + surf.geom_n * RAY_BIAS, dir);
                 if (!next.hit || next.alpha < 0.5) {
                     break;
@@ -873,7 +860,18 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
     if (LINEAR_OUTPUT) {
         return FragOut(depth, vec4<f32>(incoming, 1.0));
     }
-    let radiance = display_light(incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, emit_scale);
+    var radiance = display_light(incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, emit_scale);
+    let pbr = textureSampleLevel(pbr_tex, atlas_samp, primary.atlas_uv, 0.0);
+    let n_xy = (pbr.rg * 2.0 - 1.0) * cam.pbr.x;
+    let bump = clamp(1.0 + dot(n_xy, vec2<f32>(0.25, 0.35)), 0.2, 2.0);
+    radiance = radiance * bump;
+
+    let V = -view_dir;
+    let NdotV = clamp(dot(primary.n, V), 0.0, 1.0);
+    let F0 = mix(vec3<f32>(0.04), primary.albedo, primary.metallic);
+    let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - NdotV, 5.0);
+    let sheen = fresnel * (1.0 - primary.roughness) * cam.pbr.z;
+    radiance = mix(radiance, radiance * (vec3<f32>(1.0) + sheen * 0.35) + incoming * sheen * 0.15, primary.metallic * 0.5 + 0.15);
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
 
@@ -895,13 +893,18 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
     let base_incoming = max(incoming, vec3<f32>(primary.light * cam.fill.x * 2.0));
     var radiance = display_light(base_incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
 
+    let pbr = textureSampleLevel(pbr_tex, atlas_samp, primary.atlas_uv, 0.0);
+    let n_xy = (pbr.rg * 2.0 - 1.0) * cam.pbr.x;
+    let bump = clamp(1.0 + dot(n_xy, vec2<f32>(0.25, 0.35)), 0.2, 2.0);
+    radiance = radiance * bump;
+
     // Subtle PBR view-dependent Fresnel sheen and metallic luster (never overexposed).
     let V = -dir;
     let NdotV = clamp(dot(primary.n, V), 0.0, 1.0);
     let F0 = mix(vec3<f32>(0.04), primary.albedo, primary.metallic);
     let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - NdotV, 5.0);
     let sheen = fresnel * (1.0 - primary.roughness) * cam.pbr.z;
-    radiance = mix(radiance, radiance * (vec3<f32>(1.0) + sheen * 0.35) + base_incoming * sheen * 0.1, primary.metallic * 0.5 + 0.15);
+    radiance = mix(radiance, radiance * (vec3<f32>(1.0) + sheen * 0.35) + base_incoming * sheen * 0.15, primary.metallic * 0.5 + 0.15);
 
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
