@@ -4051,7 +4051,7 @@ pub(super) fn halo_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-const HALO_INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
+const HALO_INSTANCE_ATTRS: [wgpu::VertexAttribute; 5] = [
     wgpu::VertexAttribute {
         format: wgpu::VertexFormat::Float32x3,
         offset: 0,
@@ -4063,9 +4063,19 @@ const HALO_INSTANCE_ATTRS: [wgpu::VertexAttribute; 3] = [
         shader_location: 3,
     },
     wgpu::VertexAttribute {
-        format: wgpu::VertexFormat::Float32x4,
+        format: wgpu::VertexFormat::Float32x3,
         offset: 16,
         shader_location: 4,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x3,
+        offset: 32,
+        shader_location: 5,
+    },
+    wgpu::VertexAttribute {
+        format: wgpu::VertexFormat::Float32x4,
+        offset: 48,
+        shader_location: 6,
     },
 ];
 
@@ -4210,7 +4220,9 @@ struct VertexInput {
 struct InstanceInput {
     @location(2) center: vec3<f32>,
     @location(3) radius: f32,
-    @location(4) color: vec4<f32>,
+    @location(4) axis_u: vec3<f32>,
+    @location(5) axis_v: vec3<f32>,
+    @location(6) color: vec4<f32>,
 };
 
 struct VertexOutput {
@@ -4222,11 +4234,9 @@ struct VertexOutput {
 @vertex
 fn vs_halo(vert: VertexInput, inst: InstanceInput) -> VertexOutput {
     var out: VertexOutput;
-    let world_pos = vec3<f32>(
-        inst.center.x + vert.local_pos.x * inst.radius,
-        inst.center.y,
-        inst.center.z + vert.local_pos.y * inst.radius,
-    );
+    let world_pos = inst.center
+        + inst.axis_u * (vert.local_pos.x * inst.radius)
+        + inst.axis_v * (vert.local_pos.y * inst.radius);
     out.clip_pos = camera.view_proj * vec4<f32>(world_pos, 1.0);
     out.uv = vert.uv;
     out.color = inst.color;
