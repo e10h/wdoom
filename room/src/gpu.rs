@@ -231,11 +231,17 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         if (baked.a > 0.0) {
             let baked_rgb = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
             let blend = select(clamp(camera.fill.y, 0.0, 1.0), clamp(camera.extra.x, 0.0, 1.0), in.surface > 1.5);
-            incoming = mix(doom_light, baked_rgb, blend);
+            let baked_final = select(
+                baked_rgb,
+                doom_diminish(clamp(baked_rgb, vec3<f32>(0.0), vec3<f32>(1.0)), in.view_dist, camera.pbr.w, camera.fill.x),
+                in.surface > 1.5 && in.light < 0.99,
+            );
+            incoming = mix(doom_light, baked_final, blend);
         }
     }
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
-    incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    let obj_ceiling = select(ceiling, 1.0, in.surface > 1.5 && in.light < 0.99);
+    incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     let albedo = color.rgb * in.tint;
 
     let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
@@ -295,6 +301,7 @@ struct VoxelVertexOutput {
     @location(1) @interpolate(flat) light_uv: vec2<f32>,
     @location(2) light: f32,
     @location(3) view_dist: f32,
+    @location(4) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -310,14 +317,25 @@ fn vs_voxel(v: VoxelVertexInput, inst: VoxelInstanceInput) -> VoxelVertexOutput 
     out.light_uv = inst.light_uv;
     out.light = inst.light;
     out.view_dist = out.clip_position.w;
+    out.world_pos = world_pos;
     return out;
 }
 
 @fragment
 fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
+    let dp1 = dpdx(in.world_pos);
+    let dp2 = dpdy(in.world_pos);
+    let cross_p = cross(dp1, dp2);
+    let len2 = dot(cross_p, cross_p);
+    let geom_n = select(vec3<f32>(0.0, 1.0, 0.0), cross_p * inverseSqrt(len2), len2 > 1e-8);
+    // Directional shading so voxels look like solid 3D objects with depth, not flat glowing emitters.
+    let shade = clamp(0.80 + 0.20 * geom_n.y + 0.05 * geom_n.x, 0.65, 1.0);
+
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
+    let obj_ceiling = select(min(ceiling, 1.0), ceiling, in.light >= 0.99);
+
     var doom_light = doom_diminish(vec3<f32>(in.light), in.view_dist, camera.pbr.w, camera.fill.x);
-    doom_light = clamp(doom_light, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    doom_light = clamp(doom_light, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
 
     var incoming = doom_light;
     if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
@@ -329,12 +347,13 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
         );
         let baked = textureLoad(light_tex, coord, 0);
         if (baked.a > 0.0) {
-            let baked_rgb = max(baked.rgb, vec3<f32>(in.light * camera.fill.x * 2.0));
+            var baked_rgb = clamp(baked.rgb, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
+            baked_rgb = doom_diminish(baked_rgb, in.view_dist, camera.pbr.w, camera.fill.x);
             let blend = clamp(camera.extra.x, 0.0, 1.0);
             incoming = mix(doom_light, baked_rgb, blend);
         }
     }
-    incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
+    incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     return vec4<f32>(in.color * incoming, 1.0);
 }
 "#;
@@ -1104,7 +1123,7 @@ impl Default for TraceSettings {
             baked_light: true,
             diminish: 1.5,
             light_blend: 0.5,
-            voxel_blend: 1.0,
+            voxel_blend: 0.5,
         }
     }
 }
