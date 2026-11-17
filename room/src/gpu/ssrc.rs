@@ -144,21 +144,19 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                 let abs_depth = abs(depth_diff);
 
                 let hit_color = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
-                let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
 
-                // Detect bright emissive sources (explosions, fire, torches, plasma)
-                let is_fiery = hit_color.r > 0.55 && hit_color.g > 0.25;
-                let is_bright = lum > 0.60;
-                let is_emitter = is_bright || (is_fiery && lum > 0.45);
+                // Identify true fiery explosion cores:
+                // Explosions in Doom (SPR_BEXP, bexpa..bexpe) are blazing saturated orange-red flame:
+                // High red, moderate green, low blue, and high red-to-blue contrast.
+                // Normal ceiling lights and lamps are white/cyan/neutral with high blue (b > 0.35) or low r-b.
+                let is_explosion = hit_color.r > 0.70 && hit_color.g > 0.20 && hit_color.b < 0.22 && (hit_color.r - hit_color.b) > 0.50;
 
-                if (is_emitter) {
-                    // Emitters radiate light spherically across depth in 3D space.
-                    // Generous 3D depth reach so explosions illuminate floors, back walls,
-                    // ceilings, and nearby actors.
+                if (is_explosion) {
+                    // Explosions radiate light spherically across depth in 3D space.
                     let max_emitter_depth = max(z0 * 0.8, 80.0);
                     if (abs_depth < max_emitter_depth) {
-                        // Dramatic non-linear radiant boost for explosions and bright fire:
-                        let lum_norm = clamp((lum - 0.45) / 0.55, 0.0, 1.0);
+                        let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
+                        let lum_norm = clamp((lum - 0.40) / 0.60, 0.0, 1.0);
                         let emit_boost = 3.0 + pow(lum_norm, 1.8) * 10.0;
                         let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
                         let falloff = 1.0 / (1.0 + dist_3d * 0.012);
@@ -167,12 +165,12 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
                         break;
                     }
                 } else {
-                    // Occluding surface for subtle ambient bounce
-                    let thickness = max(z0 * 0.15, 20.0);
+                    // Normal surfaces (walls, floors, static lights) never get emissive boost.
+                    // Subtle contact diffuse bounce only:
+                    let thickness = max(z0 * 0.12, 16.0);
                     if (depth_diff > 2.0 && depth_diff < thickness) {
-                        let falloff = 1.0 / (1.0 + dist * 0.025);
-                        // Restrained ambient bounce so dark corridors stay moody
-                        ray_radiance = hit_color * 0.28 * falloff * edge_fade;
+                        let falloff = 1.0 / (1.0 + dist * 0.035);
+                        ray_radiance = hit_color * 0.08 * falloff * edge_fade;
                         hit_found = true;
                         break;
                     }

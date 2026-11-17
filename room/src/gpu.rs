@@ -2291,6 +2291,35 @@ impl GpuState {
                     );
                 }
             }
+            {
+            let image = self.ray_image.as_ref().expect("ray image");
+            let world = self.world.as_ref().expect("world");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("doom_ray_weapon"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &image.display,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &image.depth_view,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
+            draw_weapon(&mut pass, world, scene, false);
+            }
             let image = self.ray_image.as_ref().expect("ray image");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_ray_blit"),
@@ -2372,6 +2401,41 @@ impl GpuState {
                         self.trace.ssrc_strength,
                     );
                 }
+            }
+            {
+                let image = self.play_image.as_ref().expect("play image");
+                let world = self.world.as_ref().expect("world");
+                let color_view = if msaa {
+                    image.msaa_view.as_ref().expect("play msaa view")
+                } else {
+                    &image.view
+                };
+                let resolve_target = if msaa { Some(&image.view) } else { None };
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("doom_play_weapon"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: color_view,
+                        resolve_target,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                        view: &image.depth_view,
+                        depth_ops: Some(wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        }),
+                        stencil_ops: None,
+                    }),
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                    multiview_mask: None,
+                });
+                pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
+                draw_weapon(&mut pass, world, scene, msaa);
             }
             #[cfg(not(target_arch = "wasm32"))]
             let handled_by_nr = if nr_active {
@@ -2464,6 +2528,7 @@ impl GpuState {
                 pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
                 pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
                 draw_scene(&mut pass, world, scene, false, msaa);
+                draw_weapon(&mut pass, world, scene, msaa);
             }
 
             #[cfg(not(target_arch = "wasm32"))]
@@ -3863,7 +3928,7 @@ fn vs_blit(@builtin(vertex_index) vi: u32) -> VertexOutput {
 
 @fragment
 fn fs_blit(in: VertexOutput) -> @location(0) vec4<f32> {
-    return textureSample(image, image_sampler, in.uv);
+    return vec4<f32>(textureSample(image, image_sampler, in.uv).rgb, 1.0);
 }
 "#;
 
@@ -4121,7 +4186,6 @@ fn draw_scene<'a>(
     pass.set_vertex_buffer(0, world.vertices.slice(..));
     pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
     let world_n = scene.world_indices.min(scene.indices.len() as u32);
-    let total = scene.indices.len() as u32;
     if trace {
         let ray = world.ray.as_ref().expect("ray resources");
         pass.set_pipeline(&ray.pipeline);
@@ -4135,7 +4199,17 @@ fn draw_scene<'a>(
     if !trace {
         world.draw_voxels(pass, scene, msaa);
     }
-    if !trace && total > world_n {
+}
+
+fn draw_weapon<'a>(
+    pass: &mut wgpu::RenderPass<'a>,
+    world: &'a WorldGpu,
+    scene: &crate::hw::Scene,
+    msaa: bool,
+) {
+    let world_n = scene.world_indices.min(scene.indices.len() as u32);
+    let total = scene.indices.len() as u32;
+    if total > world_n {
         pass.set_vertex_buffer(0, world.vertices.slice(..));
         pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
         pass.set_pipeline(if msaa { &world.weapon_pipeline_msaa } else { &world.weapon_pipeline });
@@ -4152,7 +4226,6 @@ fn draw_overlays<'a>(
     pass.set_vertex_buffer(0, world.vertices.slice(..));
     pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
     let world_n = scene.world_indices.min(scene.indices.len() as u32);
-    let total = scene.indices.len() as u32;
     let sprites = scene.opaque_indices.min(world_n);
     if world_n > sprites {
         pass.set_pipeline(&world.pipeline);
@@ -4160,13 +4233,6 @@ fn draw_overlays<'a>(
         pass.draw_indexed(sprites..world_n, 0, 0..1);
     }
     world.draw_voxels(pass, scene, false);
-    if total > world_n {
-        pass.set_vertex_buffer(0, world.vertices.slice(..));
-        pass.set_index_buffer(world.indices.slice(..), wgpu::IndexFormat::Uint32);
-        pass.set_pipeline(&world.weapon_pipeline);
-        pass.set_bind_group(0, &world.bind_group, &[]);
-        pass.draw_indexed(world_n..total, 0, 0..1);
-    }
 }
 
 fn create_blit(device: &wgpu::Device, format: wgpu::TextureFormat) -> BlitGpu {
