@@ -68,6 +68,47 @@ fn fetch_depth(coord: vec2<i32>, dims: vec2<i32>) -> f32 {
     return textureLoad(t_depth, clamped, 0);
 }
 
+fn reconstruct_pos(px: vec2<i32>, dims: vec2<i32>, z: f32) -> vec3<f32> {
+    let ndc_x = (f32(px.x) + 0.5) / f32(dims.x) * 2.0 - 1.0;
+    let ndc_y = 1.0 - (f32(px.y) + 0.5) / f32(dims.y) * 2.0;
+    let aspect = f32(dims.x) / max(f32(dims.y), 1.0);
+    return vec3<f32>(ndc_x * z, (ndc_y / aspect) * z, z);
+}
+
+fn reconstruct_normal(px: vec2<i32>, dims: vec2<i32>, p0: vec3<f32>, z0: f32) -> vec3<f32> {
+    let z_r = linear_depth(fetch_depth(px + vec2<i32>(1, 0), dims));
+    let z_l = linear_depth(fetch_depth(px - vec2<i32>(1, 0), dims));
+    let z_d = linear_depth(fetch_depth(px + vec2<i32>(0, 1), dims));
+    let z_u = linear_depth(fetch_depth(px - vec2<i32>(0, 1), dims));
+
+    var dp_dx: vec3<f32>;
+    if (abs(z_r - z0) < abs(z_l - z0)) {
+        dp_dx = reconstruct_pos(px + vec2<i32>(1, 0), dims, z_r) - p0;
+    } else {
+        dp_dx = p0 - reconstruct_pos(px - vec2<i32>(1, 0), dims, z_l);
+    }
+
+    var dp_dy: vec3<f32>;
+    if (abs(z_d - z0) < abs(z_u - z0)) {
+        dp_dy = reconstruct_pos(px + vec2<i32>(0, 1), dims, z_d) - p0;
+    } else {
+        dp_dy = p0 - reconstruct_pos(px - vec2<i32>(0, 1), dims, z_u);
+    }
+
+    var n = cross(dp_dx, dp_dy);
+    let len = length(n);
+    if (len < 1e-4) {
+        return vec3<f32>(0.0, 0.0, -1.0);
+    }
+    n = n / len;
+    // Camera is at origin (0, 0, 0), surface is at p0 (with p0.z > 0).
+    // Vector towards camera is -p0. Surface normal must face camera: dot(n, -p0) > 0 => dot(n, p0) < 0.
+    if (dot(n, p0) > 0.0) {
+        n = -n;
+    }
+    return n;
+}
+
 @fragment
 fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
     let dims_u = textureDimensions(t_color);
@@ -87,13 +128,16 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
     }
 
     let z0 = linear_depth(d0);
+    let p0 = reconstruct_pos(px, dims, z0);
+    let n0 = reconstruct_normal(px, dims, p0, z0);
+
     let jitter = hash12(in.clip_position.xy + vec2<f32>(u.params.z * 17.0, u.params.z * 29.0));
     let base_angle = jitter * 6.2831853;
 
     var total_irradiance = vec3<f32>(0.0);
     var total_weight = 0.0;
 
-    // 16 primary directions around the 2D horizon (high-resolution angular sampling)
+    // 16 primary directions around the horizon
     let NUM_DIRS = 16;
     let inv_dims = 1.0 / vec2<f32>(dims);
     let radius_scale = u.params.y;
@@ -139,57 +183,68 @@ fn fs_cascade(in: VertexOutput) -> @location(0) vec4<f32> {
 
                 if (ds >= 0.9999) {
                     // Reached the open sky through a window or opening:
-                    let sky_sample = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
-                    ray_radiance = sky_sample * 0.9 * edge_fade;
-                    hit_found = true;
+                    let sky_ndc_x = (f32(sample_coord.x) + 0.5) / f32(dims.x) * 2.0 - 1.0;
+                    let sky_ndc_y = 1.0 - (f32(sample_coord.y) + 0.5) / f32(dims.y) * 2.0;
+                    let aspect = f32(dims.x) / max(f32(dims.y), 1.0);
+                    let sky_dir = normalize(vec3<f32>(sky_ndc_x, sky_ndc_y / aspect, 1.0));
+                    let sky_ndotl = max(dot(n0, sky_dir), 0.0);
+                    if (sky_ndotl > 0.0) {
+                        let sky_sample = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0).rgb;
+                        ray_radiance = sky_sample * (0.9 * sky_ndotl * edge_fade);
+                        hit_found = true;
+                    }
                     break;
                 }
 
                 let zs = linear_depth(ds);
                 let depth_diff = z0 - zs;
-                let abs_depth = abs(depth_diff);
 
                 let hit_sample = textureSampleLevel(t_color, s_sampler, sample_uv, 0.0);
                 let hit_color = hit_sample.rgb;
 
                 // Identify true fiery explosion cores:
-                // Explosions in Doom (SPR_BEXP, bexpa..bexpe) are blazing saturated orange-red flame:
-                // High red, moderate green, low blue, and high red-to-blue contrast.
-                // Normal ceiling lights and lamps are white/cyan/neutral with high blue (b > 0.35) or low r-b.
                 let is_explosion = hit_color.r > 0.70 && hit_color.g > 0.20 && hit_color.b < 0.22 && (hit_color.r - hit_color.b) > 0.50;
                 let is_drop = abs(hit_sample.a - 0.40) < 0.20;
 
+                // Occlusion: a foreground surface protruding between receiver and ray path blocks the light
+                if (depth_diff > max(z0 * 0.08, 12.0) && !is_explosion && !is_drop) {
+                    break;
+                }
+
+                let ps = reconstruct_pos(sample_coord, dims, zs);
+                let to_emitter = ps - p0;
+                let dist_3d = length(to_emitter);
+                let L = to_emitter / max(dist_3d, 1e-4);
+                let ndotl = max(dot(n0, L), 0.0);
+
                 if (is_explosion) {
-                    // Explosions radiate light spherically across depth in 3D space.
-                    let max_emitter_depth = max(z0 * 0.8, 80.0);
-                    if (abs_depth < max_emitter_depth) {
+                    // Explosions radiate light up to ~180 units in 3D:
+                    if (dist_3d < 180.0 && ndotl > 0.0) {
                         let lum = dot(hit_color, vec3<f32>(0.299, 0.587, 0.114));
                         let lum_norm = clamp((lum - 0.40) / 0.60, 0.0, 1.0);
                         let emit_boost = 3.0 + pow(lum_norm, 1.8) * 10.0;
-                        let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.25);
-                        let falloff = 1.0 / (1.0 + dist_3d * 0.012);
-                        ray_radiance = hit_color * emit_boost * falloff * edge_fade;
+                        let r_norm = dist_3d / 180.0;
+                        let falloff = (1.0 - r_norm) * (1.0 - r_norm);
+                        ray_radiance = hit_color * (emit_boost * falloff * ndotl * edge_fade);
                         hit_found = true;
                         break;
                     }
                 } else if (is_drop) {
-                    // Collectible drops & pickups: radiant glow on floor and surrounding geometry
-                    let max_emitter_depth = 48.0;
-                    if (abs_depth < max_emitter_depth && dist < 85.0) {
-                        let emit_boost = 5.5;
-                        let dist_3d = sqrt(dist * dist + abs_depth * abs_depth * 0.4);
-                        let falloff = 1.0 / (1.0 + (dist_3d / 22.0) * (dist_3d / 22.0));
-                        ray_radiance = hit_color * emit_boost * falloff * edge_fade;
+                    // Collectible drops: tight 3D radius (42 units) to pool on floor and adjacent walls
+                    if (dist_3d < 42.0 && ndotl > 0.0) {
+                        let emit_boost = 5.0;
+                        let r_norm = dist_3d / 42.0;
+                        let falloff = (1.0 - r_norm) * (1.0 - r_norm);
+                        ray_radiance = hit_color * (emit_boost * falloff * ndotl * edge_fade);
                         hit_found = true;
                         break;
                     }
                 } else {
-                    // Normal surfaces (walls, floors, static lights) never get emissive boost.
-                    // Subtle contact diffuse bounce only:
+                    // Subtle contact diffuse bounce:
                     let thickness = max(z0 * 0.12, 16.0);
-                    if (depth_diff > 2.0 && depth_diff < thickness) {
-                        let falloff = 1.0 / (1.0 + dist * 0.035);
-                        ray_radiance = hit_color * 0.08 * falloff * edge_fade;
+                    if (depth_diff > 2.0 && depth_diff < thickness && dist_3d < 40.0 && ndotl > 0.0) {
+                        let falloff = 1.0 / (1.0 + dist_3d * 0.05);
+                        ray_radiance = hit_color * (0.10 * falloff * ndotl * edge_fade);
                         hit_found = true;
                         break;
                     }
@@ -220,6 +275,11 @@ fn fs_composite(in: VertexOutput) -> @location(0) vec4<f32> {
         discard;
     }
 
+    let center = textureLoad(t_color, px, 0);
+    if (center.a < 0.5) {
+        discard;
+    }
+
     let z0 = linear_depth(d0);
     let inv_dims = 1.0 / vec2<f32>(dims);
 
@@ -245,9 +305,11 @@ fn fs_composite(in: VertexOutput) -> @location(0) vec4<f32> {
         let depth_w = exp(-dz / max(z0 * 0.10, 10.0));
         let w = spatial_w * depth_w;
 
-        let col = textureSampleLevel(t_color, s_sampler, vec2<f32>(p) * inv_dims, 0.0).rgb;
-        sum_col = sum_col + col * w;
-        sum_w = sum_w + w;
+        let tap = textureSampleLevel(t_color, s_sampler, vec2<f32>(p) * inv_dims, 0.0);
+        if (tap.a > 0.5) {
+            sum_col = sum_col + tap.rgb * w;
+            sum_w = sum_w + w;
+        }
     }
 
     let indirect = sum_col / max(sum_w, 0.001);
