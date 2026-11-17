@@ -868,25 +868,13 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
     let base_incoming = max(incoming, vec3<f32>(primary.light * cam.fill.x * 2.0));
     var radiance = display_light(base_incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
 
+    // Subtle PBR view-dependent Fresnel sheen and metallic luster (never overexposed).
     let V = -dir;
-    let L = normalize(vec3<f32>(0.2, 0.9, 0.3));
-    let H = normalize(V + L);
-    let N = primary.n;
-    let roughness = max(primary.roughness, 0.08);
-    let a = roughness * roughness;
-    let a2 = a * a;
-    let NdotH = max(dot(N, H), 0.0);
-    let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
-    let D = a2 / (3.14159265 * denom * denom);
-    let NdotV = max(dot(N, V), 0.001);
-    let NdotL = max(dot(N, L), 0.001);
-    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
-    let G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+    let NdotV = clamp(dot(primary.n, V), 0.0, 1.0);
     let F0 = mix(vec3<f32>(0.04), primary.albedo, primary.metallic);
-    let F = F0 + (1.0 - F0) * pow(clamp(1.0 - max(dot(H, V), 0.0), 0.0, 1.0), 5.0);
-    let spec = (D * G * F) / (4.0 * NdotV * NdotL);
-    let specular_highlight = spec * base_incoming * NdotL * 0.5;
-    radiance = radiance + specular_highlight;
+    let fresnel = F0 + (vec3<f32>(1.0) - F0) * pow(1.0 - NdotV, 5.0);
+    let sheen = fresnel * (1.0 - primary.roughness);
+    radiance = mix(radiance, radiance * (vec3<f32>(1.0) + sheen * 0.35) + base_incoming * sheen * 0.1, primary.metallic * 0.5 + 0.15);
 
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
@@ -1136,6 +1124,7 @@ pub struct GpuState {
     light_bake_key: Option<crate::hw::LightBakeKey>,
     /// True when the GPU light map has samples that are not on disk yet.
     light_bake_dirty: bool,
+    pending_clear_visible: bool,
     /// Last time a bake copy was started. Periodic saves stay off the hot path.
     light_bake_saved: Option<std::time::Instant>,
     /// Non-blocking readback / background write of a light bake.
@@ -1547,6 +1536,7 @@ impl GpuState {
             ui,
             light_bake_key: None,
             light_bake_dirty: false,
+            pending_clear_visible: false,
             light_bake_saved: None,
             #[cfg(not(target_arch = "wasm32"))]
             light_bake_job: None,
@@ -1974,6 +1964,27 @@ impl GpuState {
             }
             if store_light {
                 if let Some(world) = self.world.as_ref() {
+                    if self.pending_clear_visible {
+                        self.pending_clear_visible = false;
+                        {
+                            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                                label: Some("doom_light_clear_visible"),
+                                timestamp_writes: None,
+                            });
+                            pass.set_pipeline(&world.light_bins.as_ref().expect("native light bins").clear_visible_pipeline);
+                            pass.set_bind_group(0, &world.light_bins.as_ref().expect("native light bins").bind, &[]);
+                            pass.dispatch_workgroups((rw * rh + 63) / 64, 1, 1);
+                        }
+                        copy_light(
+                            &mut encoder,
+                            &world.light_write,
+                            &world.light,
+                            crate::hw::LIGHTMAP_SIZE,
+                        );
+                        self.accum_count = 0;
+                        self.accum_key = None;
+                        self.light_bake_dirty = true;
+                    }
                     {
                         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                             label: Some("doom_light_bin"),
@@ -2760,6 +2771,18 @@ impl GpuState {
         log::info!("restarted native light accumulation from zero samples");
     }
 
+    /// Clear only the lightmap texels currently visible in the camera view,
+    /// allowing the user to rebake what they are looking at without wiping the map.
+    pub fn clear_visible(&mut self) {
+        self.trace.mode = TraceMode::Bake;
+        crate::hw::set_bake_safe(true);
+        self.pending_clear_visible = true;
+        self.accum_count = 0;
+        self.accum_key = None;
+        self.light_bake_dirty = true;
+        log::info!("clearing visible lightmap texels for selective rebake");
+    }
+
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -2774,7 +2797,7 @@ impl GpuState {
                 ..
             } = self;
             let previous_max_light = trace.max_light;
-            let restart_bake = ui.paint(
+            let (restart_bake, clear_visible) = ui.paint(
                 device,
                 queue,
                 encoder,
@@ -2793,6 +2816,9 @@ impl GpuState {
             }
             if restart_bake {
                 self.restart_light_bake();
+            }
+            if clear_visible {
+                self.clear_visible();
             }
         }
         #[cfg(target_arch = "wasm32")]
@@ -4472,6 +4498,7 @@ struct LightBins {
     bind: wgpu::BindGroup,
     bin_pipeline: wgpu::ComputePipeline,
     save_pipeline: wgpu::ComputePipeline,
+    clear_visible_pipeline: wgpu::ComputePipeline,
 }
 
 #[repr(C)]
@@ -4587,6 +4614,22 @@ fn cs_save(@builtin(global_invocation_id) id: vec3<u32>) {
     }
     let saved = mix(old.rgb, avg, weight);
     textureStore(light_write, coord, vec4<f32>(saved, min(count + 1.0, cap)));
+}
+
+@compute @workgroup_size(64)
+fn cs_clear_visible(@builtin(global_invocation_id) id: vec3<u32>) {
+    let i = id.x;
+    if (i >= params.pixels) {
+        return;
+    }
+    let hit = light_hits[i];
+    if (hit.packed == 0u) {
+        return;
+    }
+    let texel = hit.packed - 1u;
+    let side = params.light_size;
+    let coord = vec2<i32>(i32(texel % side), i32(texel / side));
+    textureStore(light_write, coord, vec4<f32>(0.0, 0.0, 0.0, 0.0));
 }
 "#;
 
@@ -4731,6 +4774,14 @@ fn create_light_bins_sized(device: &wgpu::Device, light: &wgpu::Texture,
         compilation_options: wgpu::PipelineCompilationOptions::default(),
         cache: None,
     });
+    let clear_visible_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+        label: Some("doom_light_clear_visible"),
+        layout: Some(&pipeline_layout),
+        module: &shader,
+        entry_point: Some("cs_clear_visible"),
+        compilation_options: wgpu::PipelineCompilationOptions::default(),
+        cache: None,
+    });
     let _ = device.poll(wgpu::PollType::wait_indefinitely());
     if let Some(err) = pollster::block_on(scope.pop()) {
         return Err(err.to_string());
@@ -4741,6 +4792,7 @@ fn create_light_bins_sized(device: &wgpu::Device, light: &wgpu::Texture,
         bind,
         bin_pipeline,
         save_pipeline,
+        clear_visible_pipeline,
     })
 }
 

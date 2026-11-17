@@ -390,3 +390,13 @@ pub fn is_smaa_enabled() -> bool {
         gpu.as_ref().is_some_and(|g| g.smaa())
     })
 }
+
+/// Clear only the lightmap texels currently visible in the camera view for selective rebaking.
+#[wasm_bindgen]
+pub fn clear_visible() {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.clear_visible();
+        }
+    });
+}

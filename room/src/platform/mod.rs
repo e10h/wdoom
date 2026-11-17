@@ -120,6 +120,16 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
         }
         return;
     }
+    if code == KeyCode::F8 {
+        if pressed {
+            GPU.with_borrow_mut(|gpu| {
+                if let Some(gpu) = gpu.as_mut() {
+                    gpu.clear_visible();
+                }
+            });
+        }
+        return;
+    }
     if code == KeyCode::Escape && pressed {
         release_pointer();
     }

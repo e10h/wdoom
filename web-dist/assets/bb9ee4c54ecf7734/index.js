@@ -1,4 +1,4 @@
-import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled } from './pkg/room.js';
+import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, clear_visible } from './pkg/room.js';
 
 window.toggle_msaa = toggle_msaa;
 window.set_msaa = set_msaa;
@@ -6,11 +6,13 @@ window.is_msaa_enabled = is_msaa_enabled;
 window.toggle_smaa = toggle_smaa;
 window.set_smaa = set_smaa;
 window.is_smaa_enabled = is_smaa_enabled;
+window.clear_visible = clear_visible;
 
 const canvas = document.getElementById('doom-canvas');
 const status = document.getElementById('status');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
+const btnClearVisible = document.getElementById('btn-clear-visible');
 
 function updateButtonStates() {
   try {
@@ -44,11 +46,21 @@ if (btnSmaa) {
   });
 }
 
+if (btnClearVisible) {
+  btnClearVisible.addEventListener('click', (e) => {
+    e.stopPropagation();
+    clear_visible();
+    canvas.focus();
+  });
+}
+
 window.addEventListener('keydown', (e) => {
   if (e.key === '0') {
     setTimeout(updateButtonStates, 10);
   } else if (e.key === '\\' || e.key === 'F7') {
     setTimeout(updateButtonStates, 10);
+  } else if (e.key === 'F8') {
+    clear_visible();
   }
 });
 
