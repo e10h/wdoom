@@ -188,12 +188,14 @@ fn run_case(opposite: bool, reverse_order: bool) {
         );
         let hits = light_hit_buffer(&device, 1);
         let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
+        let pbr = test_dummy_pbr(&device, &queue);
         let bind = ray_bind_group(
             &device,
             &layout,
             &uniform,
             &atlas,
             &emission,
+            &pbr,
             &light,
             &light_write,
             &vertices,

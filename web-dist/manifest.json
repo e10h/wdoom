@@ -1,10 +1,10 @@
 {
   "version": "ba027743e3aacd50",
-  "sourceSha256": "90d8eb52f97e354f021ab7a1fcc76f3dc0d23c4b474e77babcaa969805825cfa",
+  "sourceSha256": "ee45472020eeb3a6839a7443e744d003ac10cb81a73e5bed2d47eb2533b61e80",
   "bakes": {
     "light_e1m1_418868fd2c508de1.rmlt": {
-      "nativeSha256": "540cbf2c72c66f5ef636515a9434b088c01b60aa89bc4f921e827efa536c4a62",
-      "nativeBytes": 24006392
+      "nativeSha256": "e9f2308e27bcbad5cbeea2a827a0bd41a18206c00678534f416f93211d862425",
+      "nativeBytes": 48153380
     },
     "light_e1m2_d4897360a36456a0.rmlt": {
       "nativeSha256": "045db2920bdce12c650151ee2e88bbd30a70195c95ce863e3169c1d5fe9763db",
@@ -19,13 +19,7 @@
       "nativeBytes": 4425320
     }
   },
-  "unbakedMaps": [
-    "light_e1m4_82b18cfe179f826a.rmlt",
-    "light_e1m6_0a8840dad705cc2e.rmlt",
-    "light_e1m7_a8b438e2154e266c.rmlt",
-    "light_e1m8_5a62bc85a8fc10a9.rmlt",
-    "light_e1m9_1d1a7fc86294ce06.rmlt"
-  ],
+  "unbakedMaps": [],
   "files": {
     "LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
     "LICENSE-DOOM1": "3b1e13d2554dca18d35f8dfc13c95f7421af17ff2163355892f08e20ac472cc3",
@@ -34,7 +28,7 @@
     "assets/ba027743e3aacd50/pkg/room.js": "98f273788ebdf56b111347aed4d80c4b56767903b32a0321355fa27e260af2c3",
     "assets/ba027743e3aacd50/pkg/room_bg.wasm": "a7d4c0d423b31c5acc485307e3fa09c947b0404f2baf448306d04ea497c44e0c",
     "index.html": "cb3e38428a3130ba4e0391bc8d3cdad4ed3be734960c407ab4db204ca350dff3",
-    "light/light_e1m1_418868fd2c508de1.rmlt": "0879a5e4ead0a10e1a97c2f63e1cc90c227212a6a302e0a94798ffa499c7dca1",
+    "light/light_e1m1_418868fd2c508de1.rmlt": "dbfb63a73b0ab8acf136bfff170dd69b0561f3b41a624ee8946302de47f4be15",
     "light/light_e1m2_d4897360a36456a0.rmlt": "e0b624cc7adab23a0a511e0f85a6499fe2e0dea0bbc829caab1611838c977b9e",
     "light/light_e1m3_e7ceee46f084e500.rmlt": "23e27370240b164b7d2259d9fefa76482dd7fe09a333be055f2201f5954a9f21",
     "light/light_e1m5_afeecbbab6c8cd65.rmlt": "7a397146f8657e01d155efc0ee9a0a4659095fe9e885871285dc6f0d1c079747",

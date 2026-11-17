@@ -47,6 +47,7 @@ rustysynth = "1"
 
 # Simple logger backed by stderr.
 env_logger = "0.11"
+miniz_oxide = "0.8"
 
 # Optional heap profiler (use with --features dhat-heap).
 dhat = { version = "0.3", optional = true }

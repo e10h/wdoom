@@ -2772,6 +2772,7 @@ dependencies = [
  "libc",
  "libc-wasm",
  "log",
+ "miniz_oxide 0.8.9",
  "neural-nr",
  "pollster",
  "rodio",

@@ -129,8 +129,8 @@ pub struct Scene {
     /// The HUD pass discards this rectangle and keeps the status bar.
     pub view_rect: [f32; 4],
     /// Fresh atlas pixels, present only on the frame the atlas is rebuilt.
-    /// The third buffer is the brightmap emission, one byte per texel.
-    pub atlas: Option<(u32, Vec<u8>, Vec<u8>)>,
+    /// The third buffer is brightmap emission; the fourth is PBR (Nx, Ny, Roughness, Metallic).
+    pub atlas: Option<(u32, Vec<u8>, Vec<u8>, Vec<u8>)>,
     /// The light map's rectangles moved, so stored light belongs to the
     /// previous packing and has to be cleared.
     pub light_reset: bool,
@@ -155,7 +155,7 @@ struct Atlas {
     sprite_size: Vec<(i32, i32)>,
     /// A solid white texel. Voxel faces sample this and carry their color in `tint`.
     white: [f32; 4],
-    pending: Option<(u32, Vec<u8>, Vec<u8>)>,
+    pending: Option<(u32, Vec<u8>, Vec<u8>, Vec<u8>)>,
 }
 
 struct Scratch {
@@ -361,7 +361,7 @@ fn fx(v: i32) -> f32 {
     v as f32 / FRAC
 }
 
-fn ensure_atlas(scratch: &mut Scratch) -> Option<(u32, Vec<u8>, Vec<u8>)> {
+fn ensure_atlas(scratch: &mut Scratch) -> Option<(u32, Vec<u8>, Vec<u8>, Vec<u8>)> {
     let key = unsafe { crate::doom::p_setup::vertexes as usize };
     let ready = scratch
         .atlas
@@ -427,6 +427,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
         };
         blit_wall(&mut pack, x, y, tex, w, h, pal);
         blit_wall_emission(&mut pack, x, y, tex, w, h);
+        blit_wall_pbr(&mut pack, x, y, tex, w, h, pal);
         atlas.tex_rects[tex as usize] = pack.rect(x, y, w, h);
     }
     if ok {
@@ -437,6 +438,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
             };
             blit_flat(&mut pack, x, y, flat, pal);
             blit_flat_emission(&mut pack, x, y, flat);
+            blit_flat_pbr(&mut pack, x, y, flat, pal);
             atlas.flat_rects[flat as usize] = pack.rect(x, y, 64, 64);
         }
     }
@@ -456,7 +458,7 @@ unsafe fn pack_into(atlas: &mut Atlas, size: i32, pal: &[(u8, u8, u8); 256]) -> 
             atlas.sprite_size[lump as usize] = (w, h);
         }
     }
-    atlas.pending = Some((size as u32, pack.rgba, pack.emit));
+    atlas.pending = Some((size as u32, pack.rgba, pack.emit, pack.pbr));
     ok
 }
 
@@ -486,11 +488,20 @@ struct Packer {
     rgba: Vec<u8>,
     /// One byte per texel. 0 is dark, 128 is half, 255 is a full brightmap.
     emit: Vec<u8>,
+    /// PBR material: [NormalX, NormalY, Roughness, Metallic]
+    pbr: Vec<u8>,
 }
 
 impl Packer {
     fn new(size: i32) -> Self {
         let n = (size as usize) * (size as usize);
+        let mut pbr = vec![0u8; n * 4];
+        for chunk in pbr.chunks_exact_mut(4) {
+            chunk[0] = 128; // normal X = 0.0
+            chunk[1] = 128; // normal Y = 0.0
+            chunk[2] = 204; // roughness = 0.8
+            chunk[3] = 0;   // metallic = 0.0
+        }
         Self {
             size,
             x: 0,
@@ -498,6 +509,7 @@ impl Packer {
             row_h: 0,
             rgba: vec![0u8; n * 4],
             emit: vec![0u8; n],
+            pbr,
         }
     }
 
@@ -547,6 +559,14 @@ impl Packer {
         self.emit[dst] = level;
     }
 
+    fn put_pbr(&mut self, x: i32, y: i32, pbr: [u8; 4]) {
+        if x < 0 || y < 0 || x >= self.size || y >= self.size {
+            return;
+        }
+        let dst = (y as usize * self.size as usize + x as usize) * 4;
+        self.pbr[dst..dst + 4].copy_from_slice(&pbr);
+    }
+
     fn blit(&mut self, x: i32, y: i32, w: i32, h: i32, src: &[u8]) {
         for row in 0..h {
             let dst = ((y + row) as usize * self.size as usize + x as usize) * 4;
@@ -592,6 +612,51 @@ unsafe fn blit_wall_emission(pack: &mut Packer, x: i32, y: i32, tex: i32, w: i32
     }
 }
 
+unsafe fn blit_wall_pbr(
+    pack: &mut Packer,
+    x: i32,
+    y: i32,
+    tex: i32,
+    w: i32,
+    h: i32,
+    pal: &[(u8, u8, u8); 256],
+) {
+    let name = crate::doom::r_data::hw_texture_name(tex);
+    if name[0] == 0 {
+        return;
+    }
+    if crate::pbr::sample_authored(&name, 0, 0, w, h).is_some() {
+        for row in 0..h {
+            for col in 0..w {
+                if let Some(pbr) = crate::pbr::sample_authored(&name, col, row, w, h) {
+                    pack.put_pbr(x + col, y + row, pbr);
+                }
+            }
+        }
+        return;
+    }
+    let Some((width, height, pixels)) = hw_texture_pixels(tex) else {
+        return;
+    };
+    let rw = w.min(width);
+    let rh = h.min(height);
+    let mut rgb = Vec::with_capacity((rw * rh * 3) as usize);
+    for row in 0..rh {
+        for col in 0..rw {
+            let idx = pixels[(row * width + col) as usize].unwrap_or(0);
+            let (r, g, b) = pal[idx as usize];
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    let pbr_pixels = crate::pbr::generate_procedural(&name, rw, rh, &rgb);
+    for row in 0..rh {
+        for col in 0..rw {
+            let pbr = pbr_pixels[(row * rw + col) as usize];
+            pack.put_pbr(x + col, y + row, pbr);
+        }
+    }
+}
+
 unsafe fn blit_flat(pack: &mut Packer, x: i32, y: i32, flat: i32, pal: &[(u8, u8, u8); 256]) {
     let src = W_CacheLumpNum(firstflat + flat, PU_CACHE) as *const u8;
     if src.is_null() || W_LumpLength((firstflat + flat) as u32) < 4096 {
@@ -615,6 +680,41 @@ unsafe fn blit_flat_emission(pack: &mut Packer, x: i32, y: i32, flat: i32) {
         for col in 0..64 {
             let level = crate::brightmaps::flat_level(&name, col, row);
             pack.put_emit(x + col, y + row, level);
+        }
+    }
+}
+
+unsafe fn blit_flat_pbr(pack: &mut Packer, x: i32, y: i32, flat: i32, pal: &[(u8, u8, u8); 256]) {
+    let name = flat_name(flat);
+    if name[0] == 0 {
+        return;
+    }
+    if crate::pbr::sample_authored(&name, 0, 0, 64, 64).is_some() {
+        for row in 0..64 {
+            for col in 0..64 {
+                if let Some(pbr) = crate::pbr::sample_authored(&name, col, row, 64, 64) {
+                    pack.put_pbr(x + col, y + row, pbr);
+                }
+            }
+        }
+        return;
+    }
+    let src = W_CacheLumpNum(firstflat + flat, PU_CACHE) as *const u8;
+    if src.is_null() || W_LumpLength((firstflat + flat) as u32) < 4096 {
+        return;
+    }
+    let mut rgb = Vec::with_capacity(64 * 64 * 3);
+    for row in 0..64 {
+        for col in 0..64 {
+            let idx = *src.add((row * 64 + col) as usize) as usize;
+            let (r, g, b) = pal[idx.min(255)];
+            rgb.extend_from_slice(&[r, g, b]);
+        }
+    }
+    let pbr_pixels = crate::pbr::generate_procedural(&name, 64, 64, &rgb);
+    for row in 0..64 {
+        for col in 0..64 {
+            pack.put_pbr(x + col, y + row, pbr_pixels[(row * 64 + col) as usize]);
         }
     }
 }

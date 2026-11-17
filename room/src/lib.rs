@@ -63,6 +63,7 @@ use brightmaps_embedded as brightmaps;
 
 pub mod doom;
 pub mod gpu;
+pub mod pbr;
 #[cfg(not(target_arch = "wasm32"))]
 mod light_bake;
 #[cfg(not(target_arch = "wasm32"))]

@@ -115,6 +115,7 @@ struct Camera {
 @group(0) @binding(2) var atlas_samp: sampler;
 @group(0) @binding(3) var light_tex: texture_2d<f32>;
 @group(0) @binding(4) var emit_tex: texture_2d<f32>;
+@group(0) @binding(5) var pbr_tex: texture_2d<f32>;
 
 struct VertexInput {
     @location(0) pos: vec3<f32>,
@@ -134,6 +135,7 @@ struct VertexOutput {
     @location(3) tint: vec3<f32>,
     @location(4) light_uv: vec2<f32>,
     @location(5) @interpolate(flat) surface: f32,
+    @location(6) world_pos: vec3<f32>,
 };
 
 @vertex
@@ -146,7 +148,21 @@ fn vs_world(in: VertexInput) -> VertexOutput {
     out.tint = in.tint;
     out.light_uv = in.light_uv;
     out.surface = in.surface;
+    out.world_pos = in.pos;
     return out;
+}
+
+fn cotangent_frame(N: vec3<f32>, p: vec3<f32>, uv: vec2<f32>) -> mat3x3<f32> {
+    let dp1 = dpdx(p);
+    let dp2 = dpdy(p);
+    let duv1 = dpdx(uv);
+    let duv2 = dpdy(uv);
+    let dp2perp = cross(dp2, N);
+    let dp1perp = cross(N, dp1);
+    let T = dp2perp * duv1.x + dp1perp * duv2.x;
+    let B = dp2perp * duv1.y + dp1perp * duv2.y;
+    let invmax = inverseSqrt(max(max(dot(T, T), dot(B, B)), 1e-10));
+    return mat3x3<f32>(T * invmax, B * invmax, N);
 }
 
 @fragment
@@ -194,7 +210,14 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let ceiling = max(camera.fill.x, select(1.0, camera.fill.z, camera.fill.z > 0.0));
     incoming = clamp(incoming, vec3<f32>(camera.fill.x), vec3<f32>(ceiling));
     let albedo = color.rgb * in.tint;
-    let shaded = albedo * incoming;
+
+    let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
+    var bump = 1.0;
+    if (in.surface <= 1.5) {
+        let n_xy = pbr.rg * 2.0 - 1.0;
+        bump = clamp(1.0 + dot(n_xy, vec2<f32>(0.25, 0.35)), 0.6, 1.4);
+    }
+    let shaded = albedo * incoming * bump;
     let emission = textureSampleLevel(emit_tex, atlas_samp, atlas_uv, 0.0).r;
     let radiance = max(shaded, albedo * emission);
     return vec4<f32>(radiance, 1.0);
@@ -370,6 +393,8 @@ struct Surf {
     // unique to that placed wall or floor. Negative means it is not stored.
     atlas_uv: vec2<f32>,
     light_uv: vec2<f32>,
+    roughness: f32,
+    metallic: f32,
 };
 
 const VERTEX_FLOATS: u32 = 16u;
@@ -400,6 +425,7 @@ struct LightHit {
     packed: u32,
 }
 @group(0) @binding(10) var<storage, read_write> light_hits: array<LightHit>;
+@group(0) @binding(11) var pbr_tex: texture_2d<f32>;
 
 @vertex
 fn vs_ray(@builtin(vertex_index) vi: u32) -> VertexOutput {
@@ -481,6 +507,8 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
     surf.hit = false;
     surf.atlas_uv = vec2<f32>(0.0);
     surf.light_uv = vec2<f32>(-1.0);
+    surf.roughness = 0.8;
+    surf.metallic = 0.0;
     if (hit.kind == RAY_QUERY_INTERSECTION_NONE) {
         return surf;
     }
@@ -535,7 +563,35 @@ fn trace(origin: vec3<f32>, dir: vec3<f32>) -> Surf {
         bary_mix(i0, i1, i2, 12u, b),
     );
     surf.pos = origin + dir * hit.t;
-    surf.n = n;
+    let uv0 = vec2<f32>(attr(i0, 3u), attr(i0, 4u));
+    let uv1 = vec2<f32>(attr(i1, 3u), attr(i1, 4u));
+    let uv2 = vec2<f32>(attr(i2, 3u), attr(i2, 4u));
+    let edge1 = p1 - p0;
+    let edge2 = p2 - p0;
+    let delta_uv1 = uv1 - uv0;
+    let delta_uv2 = uv2 - uv0;
+    let det = delta_uv1.x * delta_uv2.y - delta_uv2.x * delta_uv1.y;
+    var tangent = select(vec3<f32>(1.0, 0.0, 0.0), normalize((edge1 * delta_uv2.y - edge2 * delta_uv1.y) * sign(det)), abs(det) > 1e-6);
+    tangent = normalize(tangent - n * dot(n, tangent));
+    let bitangent = cross(n, tangent);
+
+    let pbr = textureSampleLevel(pbr_tex, atlas_samp, atlas_uv, 0.0);
+    let n_xy = pbr.rg * 2.0 - 1.0;
+    let n_z = sqrt(max(0.0, 1.0 - dot(n_xy, n_xy)));
+    let normal_ts = vec3<f32>(n_xy, n_z);
+    let tbn = mat3x3<f32>(tangent, bitangent, n);
+    var perturbed_n = normalize(tbn * normal_ts);
+    if (dot(perturbed_n, dir) > 0.0) {
+        perturbed_n = -perturbed_n;
+    }
+    let is_sky = bary_mix(i0, i1, i2, 13u, b) > 0.5;
+    if (!is_sky && dot(perturbed_n, perturbed_n) > 0.001) {
+        surf.n = perturbed_n;
+    } else {
+        surf.n = n;
+    }
+    surf.roughness = pbr.b;
+    surf.metallic = pbr.a;
     surf.albedo = tex.rgb * tint;
     surf.light = bary_mix(i0, i1, i2, 9u, b);
     surf.emit = textureSampleLevel(emit_tex, emit_samp, atlas_uv, 0.0).r;
@@ -810,7 +866,28 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
     if (primary.sky) { return FragOut(depth, vec4<f32>(primary.albedo, 1.0)); }
     let incoming = textureLoad(light_read, vec2<i32>(frag.xy), 0).rgb;
     let base_incoming = max(incoming, vec3<f32>(primary.light * cam.fill.x * 2.0));
-    let radiance = display_light(base_incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
+    var radiance = display_light(base_incoming, primary.albedo, primary.emit, cam.fill.x, cam.fill.w, cam.light.x);
+
+    let V = -dir;
+    let L = normalize(vec3<f32>(0.2, 0.9, 0.3));
+    let H = normalize(V + L);
+    let N = primary.n;
+    let roughness = max(primary.roughness, 0.08);
+    let a = roughness * roughness;
+    let a2 = a * a;
+    let NdotH = max(dot(N, H), 0.0);
+    let denom = NdotH * NdotH * (a2 - 1.0) + 1.0;
+    let D = a2 / (3.14159265 * denom * denom);
+    let NdotV = max(dot(N, V), 0.001);
+    let NdotL = max(dot(N, L), 0.001);
+    let k = (roughness + 1.0) * (roughness + 1.0) / 8.0;
+    let G = (NdotV / (NdotV * (1.0 - k) + k)) * (NdotL / (NdotL * (1.0 - k) + k));
+    let F0 = mix(vec3<f32>(0.04), primary.albedo, primary.metallic);
+    let F = F0 + (1.0 - F0) * pow(clamp(1.0 - max(dot(H, V), 0.0), 0.0, 1.0), 5.0);
+    let spec = (D * G * F) / (4.0 * NdotV * NdotL);
+    let specular_highlight = spec * base_incoming * NdotL * 0.5;
+    radiance = radiance + specular_highlight;
+
     return FragOut(depth, vec4<f32>(radiance, 1.0));
 }
 "#, include_str!("gpu/light_display.wgsl"));
@@ -818,6 +895,7 @@ fn fs_present(@builtin(position) frag: vec4<f32>) -> FragOut {
 struct WorldGpu {
     atlas: wgpu::Texture,
     emission: wgpu::Texture,
+    pbr: wgpu::Texture,
     /// Settled radiance on the atlas texels, sampled by the ray pass.
     light: wgpu::Texture,
     /// This frame's updated copy of `light`. Copied back after the pass.
@@ -1668,7 +1746,7 @@ impl GpuState {
         let atlas = scene
             .atlas
             .as_ref()
-            .map(|(size, rgba, emit)| (*size, rgba.as_slice(), emit.as_slice()));
+            .map(|(size, rgba, emit, pbr)| (*size, rgba.as_slice(), emit.as_slice(), pbr.as_slice()));
         self.ensure_world(atlas);
         if scene.light_reset {
             self.reset_light_bake(scene.light_bake);
@@ -2638,7 +2716,7 @@ impl GpuState {
         let Some(ray) = world.ray.as_mut() else { return; };
         if ray.present_bind.is_none() {
             ray.present_bind = Some(ray_bind_group(&self.device, &ray.layout, &ray.uniform,
-                &world.atlas, &world.emission, &image._combined, &world.light_write,
+                &world.atlas, &world.emission, &world.pbr, &image._combined, &world.light_write,
                 &world.vertices, &world.indices, &world.light_hits, &ray.tlas));
         }
     }
@@ -2821,8 +2899,8 @@ impl GpuState {
         true
     }
 
-    fn ensure_world(&mut self, atlas: Option<(u32, &[u8], &[u8])>) {
-        let Some((size, rgba, emit)) = atlas else {
+    fn ensure_world(&mut self, atlas: Option<(u32, &[u8], &[u8], &[u8])>) {
+        let Some((size, rgba, emit, pbr)) = atlas else {
             return;
         };
         if self.world.as_ref().is_some_and(|w| w.atlas_size == size) {
@@ -2859,6 +2937,25 @@ impl GpuState {
                 wgpu::TexelCopyBufferLayout {
                     offset: 0,
                     bytes_per_row: Some(size),
+                    rows_per_image: Some(size),
+                },
+                wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+            );
+            self.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &world.pbr,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                pbr,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(size * 4),
                     rows_per_image: Some(size),
                 },
                 wgpu::Extent3d {
@@ -2936,7 +3033,41 @@ impl GpuState {
                 depth_or_array_layers: 1,
             },
         );
+        let pbr_tex = self.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("doom_pbr"),
+            size: wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &pbr_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            pbr,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(size * 4),
+                rows_per_image: Some(size),
+            },
+            wgpu::Extent3d {
+                width: size,
+                height: size,
+                depth_or_array_layers: 1,
+            },
+        );
         let atlas_view = atlas_tex.create_view(&wgpu::TextureViewDescriptor::default());
+        let pbr_view = pbr_tex.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = self.device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("doom_atlas_sampler"),
             mag_filter: wgpu::FilterMode::Nearest,
@@ -3001,6 +3132,16 @@ impl GpuState {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            multisampled: false,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                        },
+                        count: None,
+                    },
                 ],
             });
         let uniform = self.device.create_buffer(&wgpu::BufferDescriptor {
@@ -3032,6 +3173,10 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&emission_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&pbr_view),
                 },
             ],
         });
@@ -3189,6 +3334,7 @@ impl GpuState {
         self.world = Some(WorldGpu {
             atlas: atlas_tex,
             emission: emission_tex,
+            pbr: pbr_tex,
             light,
             light_write,
             light_hits,
@@ -3997,6 +4143,7 @@ fn sync_ray(
         &uniform,
         &world.atlas,
         &world.emission,
+        &world.pbr,
         &world.light,
         &world.light_write,
         &world.vertices,
@@ -4114,6 +4261,16 @@ fn create_ray_pipeline_mode(device: &wgpu::Device, format: wgpu::TextureFormat, 
                     ty: wgpu::BufferBindingType::Storage { read_only: false },
                     has_dynamic_offset: false,
                     min_binding_size: None,
+                },
+                count: None,
+            },
+            wgpu::BindGroupLayoutEntry {
+                binding: 11,
+                visibility: wgpu::ShaderStages::FRAGMENT,
+                ty: wgpu::BindingType::Texture {
+                    multisampled: false,
+                    view_dimension: wgpu::TextureViewDimension::D2,
+                    sample_type: wgpu::TextureSampleType::Float { filterable: true },
                 },
                 count: None,
             },
@@ -4264,6 +4421,44 @@ fn world_light_write(device: &wgpu::Device, size: u32) -> wgpu::Texture {
             | wgpu::TextureUsages::COPY_DST,
         view_formats: &[],
     })
+}
+
+#[cfg(test)]
+pub(crate) fn test_dummy_pbr(device: &wgpu::Device, queue: &wgpu::Queue) -> wgpu::Texture {
+    let pbr = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dummy_pbr"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    queue.write_texture(
+        wgpu::TexelCopyTextureInfo {
+            texture: &pbr,
+            mip_level: 0,
+            origin: wgpu::Origin3d::ZERO,
+            aspect: wgpu::TextureAspect::All,
+        },
+        &[128, 128, 204, 0],
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(256),
+            rows_per_image: Some(1),
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    pbr
 }
 
 /// Ray targets never exceed 1080p at 16:9.
@@ -4578,6 +4773,7 @@ fn ray_bind_group(
     uniform: &wgpu::Buffer,
     atlas: &wgpu::Texture,
     emission: &wgpu::Texture,
+    pbr: &wgpu::Texture,
     light: &wgpu::Texture,
     light_write: &wgpu::Texture,
     vertices: &wgpu::Buffer,
@@ -4587,6 +4783,7 @@ fn ray_bind_group(
 ) -> wgpu::BindGroup {
     let atlas_view = atlas.create_view(&wgpu::TextureViewDescriptor::default());
     let emit_view = emission.create_view(&wgpu::TextureViewDescriptor::default());
+    let pbr_view = pbr.create_view(&wgpu::TextureViewDescriptor::default());
     let light_view = light.create_view(&wgpu::TextureViewDescriptor::default());
     let light_write_view = light_write.create_view(&wgpu::TextureViewDescriptor::default());
     let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
@@ -4652,6 +4849,10 @@ fn ray_bind_group(
             wgpu::BindGroupEntry {
                 binding: 10,
                 resource: hits.as_entire_binding(),
+            },
+            wgpu::BindGroupEntry {
+                binding: 11,
+                resource: wgpu::BindingResource::TextureView(&pbr_view),
             },
         ],
     })
@@ -4875,8 +5076,9 @@ mod ray_test {
             clear_light(&queue, &light, 1);
             let hits = light_hit_buffer(&device, 1);
             let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
+            let pbr = test_dummy_pbr(&device, &queue);
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &device, &layout, &uniform, &atlas, &emission, &pbr, &light, &light_write, &vertices,
                 &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {
@@ -5171,8 +5373,9 @@ mod ray_test {
             clear_light(&queue, &light, 1);
             let hits = light_hit_buffer(&device, 1);
             let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
+            let pbr = test_dummy_pbr(&device, &queue);
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &device, &layout, &uniform, &atlas, &emission, &pbr, &light, &light_write, &vertices,
                 &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {
@@ -5474,8 +5677,9 @@ mod ray_test {
             clear_light(&queue, &light, 1);
             let hits = light_hit_buffer(&device, 1);
             let _bins = create_light_bins(&device, &light, &light_write, &hits).expect("light bins");
+            let pbr = test_dummy_pbr(&device, &queue);
             let bind = ray_bind_group(
-                &device, &layout, &uniform, &atlas, &emission, &light, &light_write, &vertices,
+                &device, &layout, &uniform, &atlas, &emission, &pbr, &light, &light_write, &vertices,
                 &index_buf, &hits, &tlas,
             );
             let cam = RayUniform {

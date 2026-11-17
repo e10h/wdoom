@@ -88,6 +88,8 @@ fn opposite_wall_materials_stay_on_their_own_side() {
             view_formats: &[],
         });
         let emission_view = emission.create_view(&Default::default());
+        let pbr = test_dummy_pbr(&device, &queue);
+        let pbr_view = pbr.create_view(&Default::default());
         let sampler = device.create_sampler(&Default::default());
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -118,6 +120,10 @@ fn opposite_wall_materials_stay_on_their_own_side() {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&emission_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&pbr_view),
                 },
             ],
         });
@@ -448,6 +454,16 @@ fn test_weapon_render_scanline_121() {
                         },
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
                 ],
             }))],
             immediate_size: 0,
@@ -483,7 +499,7 @@ fn test_weapon_render_scanline_121() {
             cache: None,
         });
 
-        let (atlas_size, atlas_rgba, atlas_emit) = scene.atlas.expect("scene atlas");
+        let (atlas_size, atlas_rgba, atlas_emit, atlas_pbr) = scene.atlas.expect("scene atlas");
         let atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("atlas"),
             size: wgpu::Extent3d {
@@ -532,6 +548,31 @@ fn test_weapon_render_scanline_121() {
                 rows_per_image: Some(atlas_size),
             },
             emit_tex.size(),
+        );
+
+        let pbr_tex = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("pbr"),
+            size: wgpu::Extent3d {
+                width: atlas_size,
+                height: atlas_size,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            pbr_tex.as_image_copy(),
+            &atlas_pbr,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(atlas_size * 4),
+                rows_per_image: Some(atlas_size),
+            },
+            pbr_tex.size(),
         );
 
         let light_tex = device.create_texture(&wgpu::TextureDescriptor {
@@ -592,6 +633,10 @@ fn test_weapon_render_scanline_121() {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: wgpu::BindingResource::TextureView(&emit_tex.create_view(&Default::default())),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(&pbr_tex.create_view(&Default::default())),
                 },
             ],
         });
