@@ -257,7 +257,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     let metallic = pbr.a;
     var final_incoming = incoming;
     if (is_drop) {
-        final_incoming = max(final_incoming, vec3<f32>(0.92));
+        final_incoming = max(final_incoming, vec3<f32>(0.65));
     }
     let shaded = albedo * final_incoming * bump;
     let emission = max(
@@ -374,7 +374,7 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
         incoming = max(incoming, vec3<f32>(in.light));
     }
     if (is_drop) {
-        incoming = max(incoming, vec3<f32>(0.92));
+        incoming = max(incoming, vec3<f32>(0.65));
     }
     incoming = clamp(incoming * shade, vec3<f32>(camera.fill.x), vec3<f32>(obj_ceiling));
     let lit_color = in.color * incoming;
