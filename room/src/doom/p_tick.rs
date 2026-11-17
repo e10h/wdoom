@@ -202,6 +202,15 @@ pub extern "C" fn P_RunThinkers() {
 pub extern "C" fn P_Ticker() {
     unsafe {
         if paused != 0 {
+            if playeringame[consoleplayer as usize] != 0 {
+                let player = &mut players[consoleplayer as usize];
+                if !player.mo.is_null() {
+                    let mo = (*player).mo as *mut crate::doom::c_ffi::mobj_t;
+                    (*mo).angle = (*mo)
+                        .angle
+                        .wrapping_add(((player.cmd.angleturn) as u32).wrapping_shl(16));
+                }
+            }
             return;
         }
 

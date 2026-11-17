@@ -388,7 +388,7 @@ use crate::doom::r_main::{setsizeneeded, R_ExecuteSetViewSize, R_Init, R_RenderP
 
 // r_draw.rs
 use crate::doom::r_draw::{
-    scaledviewwidth, viewheight, viewwindowx, viewwindowy, R_DrawViewBorder, R_FillBackScreen,
+    scaledviewwidth, viewheight, R_DrawViewBorder, R_FillBackScreen,
 };
 
 // i_video.rs
@@ -440,7 +440,7 @@ use crate::doom::w_main::W_ParseCommandLine;
 
 // v_video.rs
 use crate::doom::v_video::{
-    patch_t, V_DrawMouseSpeedBox, V_DrawPatch, V_DrawPatchDirect, V_Init, V_RestoreBuffer,
+    patch_t, V_DrawMouseSpeedBox, V_DrawPatch, V_Init, V_RestoreBuffer,
 };
 
 // f_finale.rs
@@ -723,20 +723,6 @@ pub extern "C" fn D_Display() {
         D_DISP_INHELPSCREENS = inhelpscreens;
         D_DISP_OLD_GAMESTATE = gamestate;
         wipegamestate = gamestate;
-
-        // Draw pause pic
-        if paused != 0 {
-            let y = if automapactive != 0 {
-                4
-            } else {
-                viewwindowy + 4
-            };
-            V_DrawPatchDirect(
-                viewwindowx + (scaledviewwidth - 68) / 2,
-                y,
-                W_CacheLumpName(DEH_String(c"M_PAUSE".as_ptr()), PU_CACHE) as *mut patch_t,
-            );
-        }
 
         // Menus go directly to the screen
         M_Drawer();

@@ -339,6 +339,26 @@ pub fn toggle_msaa() -> bool {
     })
 }
 
+/// Toggle game pause state without opening any menu.
+#[wasm_bindgen]
+pub fn toggle_pause() -> bool {
+    unsafe {
+        crate::doom::g_game::paused ^= 1;
+        if crate::doom::g_game::paused != 0 {
+            crate::doom::s_sound::S_PauseSound();
+        } else {
+            crate::doom::s_sound::S_ResumeSound();
+        }
+        crate::doom::g_game::paused != 0
+    }
+}
+
+/// Check whether the game scene is currently paused.
+#[wasm_bindgen]
+pub fn is_paused() -> bool {
+    unsafe { crate::doom::g_game::paused != 0 }
+}
+
 /// Explicitly enable or disable 4× MSAA.
 #[wasm_bindgen]
 pub fn set_msaa(enabled: bool) -> bool {

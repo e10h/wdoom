@@ -89,6 +89,15 @@ export function is_msaa_enabled() {
 }
 
 /**
+ * Check whether the game scene is currently paused.
+ * @returns {boolean}
+ */
+export function is_paused() {
+    const ret = wasm.is_paused();
+    return ret !== 0;
+}
+
+/**
  * Check whether SMAA is currently enabled.
  * @returns {boolean}
  */
@@ -229,6 +238,15 @@ export function toggle_baked_light() {
  */
 export function toggle_msaa() {
     const ret = wasm.toggle_msaa();
+    return ret !== 0;
+}
+
+/**
+ * Toggle game pause state without opening any menu.
+ * @returns {boolean}
+ */
+export function toggle_pause() {
+    const ret = wasm.toggle_pause();
     return ret !== 0;
 }
 

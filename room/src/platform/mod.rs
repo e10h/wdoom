@@ -92,6 +92,19 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
     if repeat {
         return;
     }
+    if matches!(code, KeyCode::KeyP | KeyCode::Pause) || (code == KeyCode::KeyM && unsafe { crate::doom::am_map::automapactive == 0 }) {
+        if pressed {
+            unsafe {
+                crate::doom::g_game::paused ^= 1;
+                if crate::doom::g_game::paused != 0 {
+                    crate::doom::s_sound::S_PauseSound();
+                } else {
+                    crate::doom::s_sound::S_ResumeSound();
+                }
+            }
+        }
+        return;
+    }
     if matches!(code, KeyCode::Digit8 | KeyCode::Numpad8) {
         if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.cycle_neural_mode();}});}
         return;

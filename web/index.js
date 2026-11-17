@@ -1,5 +1,7 @@
-import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, set_ssrc, is_ssrc_enabled, toggle_ssrc, set_ssrc_strength, get_ssrc_strength, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen, set_bounce_boost, get_bounce_boost, set_baked_light, is_baked_light_enabled, toggle_baked_light, set_diminish, get_diminish, set_light_blend, get_light_blend, set_voxel_blend, get_voxel_blend } from './pkg/room.js';
+import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, set_ssrc, is_ssrc_enabled, toggle_ssrc, set_ssrc_strength, get_ssrc_strength, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen, set_bounce_boost, get_bounce_boost, set_baked_light, is_baked_light_enabled, toggle_baked_light, set_diminish, get_diminish, set_light_blend, get_light_blend, set_voxel_blend, get_voxel_blend, toggle_pause, is_paused } from './pkg/room.js';
 
+window.toggle_pause = toggle_pause;
+window.is_paused = is_paused;
 window.toggle_msaa = toggle_msaa;
 window.set_msaa = set_msaa;
 window.is_msaa_enabled = is_msaa_enabled;
@@ -36,6 +38,7 @@ const btnBake = document.getElementById('btn-bake');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
 const btnSsrc = document.getElementById('btn-ssrc');
+const btnPause = document.getElementById('btn-pause');
 const btnClearVisible = document.getElementById('btn-clear-visible');
 const sliderBlend = document.getElementById('slider-blend');
 const sliderVoxelBlend = document.getElementById('slider-voxel-blend');
@@ -65,6 +68,12 @@ function updateButtonStates() {
       const ssrcOn = is_ssrc_enabled();
       btnSsrc.textContent = `SSRC: ${ssrcOn ? 'ON' : 'OFF'}`;
       btnSsrc.classList.toggle('active', ssrcOn);
+    }
+
+    if (btnPause) {
+      const paused = is_paused();
+      btnPause.textContent = `Pause: ${paused ? 'ON' : 'OFF'}`;
+      btnPause.classList.toggle('active', paused);
     }
   } catch (_) {
     // Before doom/GPU is initialized
@@ -107,6 +116,15 @@ if (btnSsrc) {
     e.stopPropagation();
     const now = !is_ssrc_enabled();
     set_ssrc(now);
+    updateButtonStates();
+    canvas.focus();
+  });
+}
+
+if (btnPause) {
+  btnPause.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggle_pause();
     updateButtonStates();
     canvas.focus();
   });
@@ -179,6 +197,8 @@ window.addEventListener('keydown', (e) => {
     setTimeout(updateButtonStates, 10);
   } else if (e.key === 'F8') {
     clear_visible();
+  } else if (e.key === 'p' || e.key === 'P' || e.key === 'm' || e.key === 'M') {
+    setTimeout(updateButtonStates, 10);
   }
 });
 
