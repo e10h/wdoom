@@ -1123,7 +1123,7 @@ impl Default for TraceSettings {
             baked_light: true,
             diminish: 1.5,
             light_blend: 0.5,
-            voxel_blend: 0.5,
+            voxel_blend: 0.4,
         }
     }
 }

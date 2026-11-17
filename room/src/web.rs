@@ -532,6 +532,6 @@ pub fn set_voxel_blend(val: f32) {
 #[wasm_bindgen]
 pub fn get_voxel_blend() -> f32 {
     GPU.with_borrow(|gpu| {
-        gpu.as_ref().map_or(0.5, |g| g.voxel_blend())
+        gpu.as_ref().map_or(0.4, |g| g.voxel_blend())
     })
 }
