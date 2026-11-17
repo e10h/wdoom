@@ -23,9 +23,8 @@ const status = document.getElementById('status');
 const btnBake = document.getElementById('btn-bake');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
-const btnSsrc = document.getElementById('btn-ssrc');
 const btnClearVisible = document.getElementById('btn-clear-visible');
-const sliderSsrc = document.getElementById('slider-ssrc');
+const sliderBounce = document.getElementById('slider-bounce');
 const sliderNormal = document.getElementById('slider-normal');
 const sliderRoughness = document.getElementById('slider-roughness');
 
@@ -44,12 +43,6 @@ function updateButtonStates() {
     const smaaOn = is_smaa_enabled();
     btnSmaa.textContent = `SMAA: ${smaaOn ? 'ON' : 'OFF'}`;
     btnSmaa.classList.toggle('active', smaaOn);
-
-    if (btnSsrc) {
-      const ssrcOn = is_ssrc_enabled();
-      btnSsrc.textContent = `SSRC: ${ssrcOn ? 'ON' : 'OFF'}`;
-      btnSsrc.classList.toggle('active', ssrcOn);
-    }
   } catch (_) {
     // Before doom/GPU is initialized
   }
@@ -65,20 +58,10 @@ if (btnBake) {
   });
 }
 
-if (btnSsrc) {
-  btnSsrc.addEventListener('click', (e) => {
+if (sliderBounce) {
+  sliderBounce.addEventListener('input', (e) => {
     e.stopPropagation();
-    const now = !is_ssrc_enabled();
-    set_ssrc(now);
-    updateButtonStates();
-    canvas.focus();
-  });
-}
-
-if (sliderSsrc) {
-  sliderSsrc.addEventListener('input', (e) => {
-    e.stopPropagation();
-    set_ssrc_strength(parseFloat(e.target.value));
+    set_bounce_boost(parseFloat(e.target.value));
   });
 }
 
@@ -123,10 +106,7 @@ if (sliderRoughness) {
 }
 
 window.addEventListener('keydown', (e) => {
-  if (e.key === 'F5' || e.key === ']') {
-    e.preventDefault();
-    setTimeout(updateButtonStates, 10);
-  } else if (e.key === 'F6' || e.key === '[') {
+  if (e.key === 'F6' || e.key === '[') {
     e.preventDefault();
     setTimeout(updateButtonStates, 10);
   } else if (e.key === '0') {

@@ -100,16 +100,6 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
         if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.toggle_neural();}});}
         return;
     }
-    if matches!(code, KeyCode::BracketRight | KeyCode::F5) {
-        if pressed {
-            GPU.with_borrow_mut(|gpu| {
-                if let Some(gpu) = gpu.as_mut() {
-                    gpu.toggle_ssrc();
-                }
-            });
-        }
-        return;
-    }
     if matches!(code, KeyCode::BracketLeft | KeyCode::F6) {
         if pressed {
             GPU.with_borrow_mut(|gpu| {

@@ -65,11 +65,10 @@
     <button id="btn-bake" title="Toggle baked raytraced lightmap ([ or F6)">Bake: ON</button>
     <button id="btn-msaa" title="Toggle 4× hardware MSAA (\ or F7)">MSAA (4×): OFF</button>
     <button id="btn-smaa" title="Toggle post-pixelization SMAA (0)">SMAA: OFF</button>
-    <button id="btn-ssrc" title="Toggle Screen-Space Radiance Cascades secondary bounce (] or F5)">SSRC: ON</button>
     <button id="btn-clear-visible" title="Clear visible light and rebake what you see (F8)">Clear Visible</button>
     <label style="color:#bbb;font:12px monospace;display:flex;align-items:center;gap:4px;background:rgba(20,20,20,0.7);padding:2px 8px;border-radius:4px;border:1px solid #444;">
-      SSRC:
-      <input id="slider-ssrc" type="range" min="0" max="2.5" step="0.1" value="1.0" style="width:64px;vertical-align:middle;">
+      Bounce:
+      <input id="slider-bounce" type="range" min="0.5" max="3.0" step="0.1" value="1.8" style="width:64px;vertical-align:middle;">
     </label>
     <label style="color:#bbb;font:12px monospace;display:flex;align-items:center;gap:4px;background:rgba(20,20,20,0.7);padding:2px 8px;border-radius:4px;border:1px solid #444;">
       Bump:
@@ -82,6 +81,6 @@
   </div>
   <canvas id="doom-canvas" width="640" height="400" tabindex="0"></canvas>
   <div id="status">Loading…</div>
-  <script type="module" src="assets/0632bf21451a9ce1/index.js"></script>
+  <script type="module" src="assets/e6a3f5b66973b842/index.js"></script>
 </body>
 </html>

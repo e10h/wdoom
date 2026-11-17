@@ -195,7 +195,7 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
         discard;
     }
     var incoming = vec3<f32>(in.light);
-    if (camera.fill.w > 0.5 && in.light_uv.x >= 0.0) {
+    if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
         let dims = textureDimensions(light_tex);
         let coord = clamp(
             vec2<i32>(in.light_uv * vec2<f32>(dims)),
@@ -477,6 +477,14 @@ fn rand(state: ptr<function, u32>) -> f32 {
 fn sky_light(dir: vec3<f32>) -> vec3<f32> {
     let t = clamp(dir.y * 0.45 + 0.35, 0.0, 1.0);
     return mix(vec3<f32>(0.66, 0.74, 0.80), vec3<f32>(0.32, 0.48, 0.74), t) * 1.5;
+}
+
+fn bounce_albedo(alb: vec3<f32>, boost: f32) -> vec3<f32> {
+    let luminance = dot(alb, vec3<f32>(0.299, 0.587, 0.114));
+    let norm_color = alb / max(luminance, 0.001);
+    let scale = select(1.8, boost, boost > 0.01);
+    let boosted_lum = clamp(pow(luminance, 0.55) * scale, 0.0, 0.85);
+    return clamp(norm_color * boosted_lum, vec3<f32>(0.0), vec3<f32>(0.85));
 }
 
 fn hemisphere(n: vec3<f32>, state: ptr<function, u32>) -> vec3<f32> {
@@ -791,7 +799,9 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                 }
                 // The surface we see keeps its own texel. Later hits contribute
                 // their color into the light arriving here.
-                let shade = select(vec3<f32>(1.0), surf.albedo, bounce > 0);
+                let boost = cam.pbr.w;
+                let bounce_alb = bounce_albedo(surf.albedo, boost);
+                let shade = select(vec3<f32>(1.0), bounce_alb, bounce > 0);
                 if (bounce > 0 && surf.emit > 0.0 && !surf.sampled_emitter) {
                     incoming += throughput * surf.albedo * surf.emit * emit_scale;
                 }
@@ -823,7 +833,7 @@ fn fs_ray(@builtin(position) frag: vec4<f32>) -> FragOut {
                     break;
                 }
                 if (bounce > 0) {
-                    throughput = throughput * surf.albedo;
+                    throughput = throughput * bounce_alb;
                 }
                 dir = hemisphere(surf.geom_n, &rng);
                 let next = trace(surf.pos + surf.geom_n * RAY_BIAS, dir);
@@ -1003,10 +1013,8 @@ pub(crate) struct TraceSettings {
     pub(crate) roughness_scale: f32,
     /// Specular sheen and metallic luster intensity (0.0 = off, 1.0 = default).
     pub(crate) specular_sheen: f32,
-    /// Screen-Space Radiance Cascades for real-time secondary diffuse bounce.
-    pub(crate) ssrc: bool,
-    /// Multiplier for SSRC diffuse bounce irradiance (0.0 to 3.0).
-    pub(crate) ssrc_strength: f32,
+    /// Scale on diffuse indirect bounce albedo (1.0 = physical, 1.8 = real-world interior wall lift).
+    pub(crate) bounce_boost: f32,
     /// Use raytraced baked lightmap when rendering Play mode.
     pub(crate) baked_light: bool,
 }
@@ -1017,7 +1025,7 @@ impl Default for TraceSettings {
             mode: TraceMode::Play,
             emission: 40.0,
             environment: 1.0,
-            bounces: 2,
+            bounces: 4,
             height: 720,
             world_space: true,
             flashlight: 0.0,
@@ -1036,8 +1044,7 @@ impl Default for TraceSettings {
             normal_strength: 1.0,
             roughness_scale: 1.0,
             specular_sheen: 1.0,
-            ssrc: true,
-            ssrc_strength: 1.0,
+            bounce_boost: 1.8,
             baked_light: true,
         }
     }
@@ -1164,7 +1171,6 @@ pub struct GpuState {
     #[cfg(not(target_arch = "wasm32"))]
     nr_live: Option<neural::Live>,
     smaa_target: Option<(smaa::SmaaTarget, (u32, u32))>,
-    ssrc_pass: Option<ssrc::SsrcPass>,
     blit: BlitGpu,
     accum: AccGpu,
     #[cfg(not(target_arch = "wasm32"))]
@@ -1577,7 +1583,6 @@ impl GpuState {
             ray_image: None,
             play_image: None,
             smaa_target: None,
-            ssrc_pass: None,
             #[cfg(not(target_arch = "wasm32"))]
             nr_live: None,
             blit,
@@ -1808,7 +1813,7 @@ impl GpuState {
                     self.trace.min_light,
                     self.trace.emission,
                     self.trace.max_light,
-                    if self.trace.baked_light { 1.0 } else { 0.0 },
+                    if self.trace.baked_light { 0.0 } else { 1.0 },
                 ],
                 pbr: [self.trace.normal_strength, self.trace.roughness_scale, self.trace.specular_sheen, 0.0],
             };
@@ -2158,25 +2163,6 @@ impl GpuState {
             pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
             draw_overlays(&mut pass, world, scene);
             }
-            if self.trace.ssrc {
-                let image = self.ray_image.as_ref().expect("ray image");
-                if self.ssrc_pass.is_none() {
-                    self.ssrc_pass = Some(ssrc::SsrcPass::new(&self.device, self.config.format, rw, rh));
-                }
-                if let Some(ssrc) = self.ssrc_pass.as_mut() {
-                    ssrc.render(
-                        &mut encoder,
-                        &self.device,
-                        &self.queue,
-                        &image.display,
-                        &image.depth_view,
-                        &image.display,
-                        rw,
-                        rh,
-                        self.trace.ssrc_strength,
-                    );
-                }
-            }
             let image = self.ray_image.as_ref().expect("ray image");
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_ray_blit"),
@@ -2239,25 +2225,6 @@ impl GpuState {
                 });
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
                 draw_scene(&mut pass, world, scene, false, msaa);
-            }
-            if self.trace.ssrc && !msaa {
-                let image = self.play_image.as_ref().expect("play image");
-                if self.ssrc_pass.is_none() {
-                    self.ssrc_pass = Some(ssrc::SsrcPass::new(&self.device, self.config.format, rw, rh));
-                }
-                if let Some(ssrc) = self.ssrc_pass.as_mut() {
-                    ssrc.render(
-                        &mut encoder,
-                        &self.device,
-                        &self.queue,
-                        &image.view,
-                        &image.depth_view,
-                        &image.view,
-                        rw,
-                        rh,
-                        self.trace.ssrc_strength,
-                    );
-                }
             }
             #[cfg(not(target_arch = "wasm32"))]
             let handled_by_nr = if nr_active {
@@ -2901,25 +2868,12 @@ impl GpuState {
         self.trace.specular_sheen = val.clamp(0.0, 5.0);
     }
 
-    pub fn ssrc(&self) -> bool {
-        self.trace.ssrc
+    pub fn bounce_boost(&self) -> f32 {
+        self.trace.bounce_boost
     }
 
-    pub fn set_ssrc(&mut self, val: bool) {
-        self.trace.ssrc = val;
-    }
-
-    pub(crate) fn toggle_ssrc(&mut self) -> bool {
-        self.trace.ssrc = !self.trace.ssrc;
-        self.trace.ssrc
-    }
-
-    pub fn ssrc_strength(&self) -> f32 {
-        self.trace.ssrc_strength
-    }
-
-    pub fn set_ssrc_strength(&mut self, val: f32) {
-        self.trace.ssrc_strength = val.clamp(0.0, 3.0);
+    pub fn set_bounce_boost(&mut self, val: f32) {
+        self.trace.bounce_boost = val.clamp(0.2, 4.0);
     }
 
     pub fn baked_light(&self) -> bool {
@@ -3072,7 +3026,7 @@ impl GpuState {
                 self.trace.normal_strength,
                 self.trace.roughness_scale,
                 self.trace.specular_sheen,
-                0.0,
+                self.trace.bounce_boost,
             ],
             // Keep the original texture-emission path for ceilings. Dedicated
             // sources are only for standing lamps/torches; their records leave
@@ -6054,8 +6008,6 @@ mod msaa_test;
 
 mod msaa;
 use msaa::{msaa_color_target, voxel_msaa_pipeline, world_msaa_pipeline};
-
-mod ssrc;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod linear_accum_test;
