@@ -1444,7 +1444,7 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
 
     let (base_radius, base_color): (f32, [f32; 4]) = if th.sprite == SPR_BAR1 {
-        (64.0, [0.10, 1.0, 0.22, 0.90])
+        (52.0, [0.06, 0.42, 0.12, 0.40])
     } else if th.sprite == SPR_BEXP {
         match frame_idx {
             0 => (50.0, [1.0, 0.90, 0.25, 1.0]),
@@ -1522,19 +1522,15 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
     }
 
     // 2. Ceiling halo (the open barrel top emits upwards to the ceiling, as do larger explosions)
-    let (ceil_reach, ceil_linear) = if th.sprite == SPR_BAR1 {
-        (130.0, true)
+    let ceil_reach = if th.sprite == SPR_BAR1 {
+        96.0
     } else {
-        (base_radius, false)
+        base_radius
     };
     if base_radius >= 40.0 || th.sprite == SPR_BAR1 {
         let h_ceil = (ceil_y - emitter_y).max(0.0);
         if h_ceil > 0.0 && h_ceil < ceil_reach {
-            let atten = if ceil_linear {
-                (1.0 - h_ceil / ceil_reach).max(0.0)
-            } else {
-                (1.0 - h_ceil / ceil_reach).powi(2)
-            };
+            let atten = (1.0 - h_ceil / ceil_reach).powi(2);
             let r_ceil = (ceil_reach * ceil_reach - h_ceil * h_ceil).sqrt().max(base_radius * 0.45);
             halos.push(HaloInstance {
                 center: [x0, ceil_y - 0.35, z0],
@@ -1667,7 +1663,13 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
 
             let center_x = qx + nx * 0.35;
             let center_z = qz + nz * 0.35;
-            let center_y = emitter_y.clamp(floor_y + 8.0, ceil_y - 8.0);
+            let (center_y, r_wall) = if th.sprite == SPR_BAR1 {
+                let mid_y = ((emitter_y + ceil_y) * 0.5).min(ceil_y - 4.0);
+                let span = ((ceil_y - emitter_y) * 0.65).max(r_wall);
+                (mid_y, span)
+            } else {
+                (emitter_y.clamp(floor_y + 8.0, ceil_y - 8.0), r_wall)
+            };
 
             halos.push(HaloInstance {
                 center: [center_x, center_y, center_z],
@@ -2716,7 +2718,7 @@ mod tests {
         let ceiling_halo = halos.iter().find(|h| (h.center[1] - (128.0 - 0.35)).abs() < 0.01).expect("barrel must illuminate ceiling");
         assert_eq!(ceiling_halo.axis_v, [0.0, 0.0, 1.0]);
         assert!(ceiling_halo.color[1] > ceiling_halo.color[0]);
-        assert!(ceiling_halo.radius >= 60.0);
+        assert!(ceiling_halo.radius >= 40.0);
         // Verify wall halo exists
         let wall_halo = halos.iter().find(|h| h.axis_v == [0.0, 1.0, 0.0]).expect("barrel must illuminate wall");
         assert!(wall_halo.color[1] > wall_halo.color[0]);
