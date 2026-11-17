@@ -1486,46 +1486,8 @@ fn dedup_poly(poly: &mut Vec<[f32; 2]>) {
 
 const FF_FRAMEMASK: i32 = 0x7fff;
 
-unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloInstance>) {
-    let frame_idx = (th.frame & FF_FRAMEMASK) as usize;
-
-    let (base_radius, base_color): (f32, [f32; 4]) = if th.sprite == SPR_BAR1 {
-        // Toxic barrels are lit with normal-aware 3D light probes
-        return;
-    } else if th.sprite == SPR_BEXP {
-        match frame_idx {
-            0 => (50.0, [1.0, 0.90, 0.25, 1.0]),
-            1 => (90.0, [1.0, 0.75, 0.15, 1.0]),
-            2 => (130.0, [1.0, 0.55, 0.10, 0.85]),
-            3 => (150.0, [0.85, 0.35, 0.05, 0.55]),
-            _ => (160.0, [0.50, 0.20, 0.05, 0.25]),
-        }
-    } else if th.sprite == SPR_MISL {
-        if frame_idx == 0 {
-            (22.0, [1.0, 0.70, 0.20, 0.60])
-        } else {
-            match frame_idx {
-                1 => (75.0, [1.0, 0.85, 0.25, 1.0]),
-                2 => (120.0, [1.0, 0.55, 0.10, 0.80]),
-                _ => (140.0, [0.70, 0.30, 0.05, 0.40]),
-            }
-        }
-    } else if th.sprite == SPR_PLSS {
-        (24.0, [0.20, 0.50, 1.0, 0.70])
-    } else if th.sprite == SPR_PLSE {
-        (55.0, [0.30, 0.70, 1.0, 0.90])
-    } else if th.sprite == SPR_BFS1 {
-        (60.0, [0.30, 1.0, 0.40, 0.90])
-    } else if th.sprite == SPR_BFE1 || th.sprite == SPR_BFE2 {
-        let (radius, alpha) = match frame_idx {
-            0 => (100.0, 1.0),
-            1 => (150.0, 1.0),
-            2 => (180.0, 0.85),
-            3 => (200.0, 0.60),
-            _ => (210.0, 0.30),
-        };
-        (radius, [0.20, 1.0, 0.30, alpha])
-    } else if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
+unsafe fn push_thing_halos(th: &mobj_t, _sector: &sector_t, halos: &mut Vec<HaloInstance>) {
+    let (base_radius, base_color): (f32, [f32; 4]) = if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
         match th.sprite {
             SPR_ARM1 | SPR_ARM2 | SPR_SOUL | SPR_MEGA => (22.0, [0.15, 0.45, 1.0, 0.55]),
             SPR_BON1 | SPR_BON2 | SPR_STIM | SPR_MEDI => (18.0, [0.20, 0.90, 0.30, 0.50]),
@@ -1533,202 +1495,23 @@ unsafe fn push_thing_halos(th: &mobj_t, sector: &sector_t, halos: &mut Vec<HaloI
             _ => (18.0, [0.60, 0.75, 0.90, 0.35]),
         }
     } else {
+        // Dynamic lights (barrels, explosions, missiles, plasma, BFG) are lit with 3D normal-aware light probes
         return;
     };
 
     let floor_y = fx(th.floorz);
-    let ceil_y = fx(th.ceilingz);
-    let emitter_y = if th.sprite == SPR_BAR1 {
-        fx(th.z) + 38.0
-    } else {
-        fx(th.z) + 16.0
-    };
     let x0 = fx(th.x);
     let z0 = -fx(th.y);
 
-    // 1. Floor halo (barrels have glowing goo at the open top, so the metal drum blocks downward light onto the floor)
-    if th.sprite != SPR_BAR1 {
-        let h_floor = if (th.flags & (MF_SPECIAL | MF_DROPPED)) != 0 {
-            0.0
-        } else {
-            (emitter_y - floor_y).max(0.0)
-        };
-        if h_floor < base_radius {
-            let atten = (1.0 - h_floor / base_radius).powi(2);
-            let r_floor = (base_radius * base_radius - h_floor * h_floor).sqrt().max(base_radius * 0.45);
-            halos.push(HaloInstance {
-                center: [x0, floor_y + 0.35, z0],
-                radius: r_floor,
-                axis_u: [1.0, 0.0, 0.0],
-                _pad0: 0.0,
-                axis_v: [0.0, 0.0, 1.0],
-                _pad1: 0.0,
-                color: [base_color[0], base_color[1], base_color[2], base_color[3] * atten],
-            });
-        }
-    }
-
-    // 2. Ceiling halo (the open barrel top emits upwards to the ceiling, as do larger explosions)
-    let ceil_reach = if th.sprite == SPR_BAR1 {
-        96.0
-    } else {
-        base_radius
-    };
-    if base_radius >= 40.0 || th.sprite == SPR_BAR1 {
-        let h_ceil = (ceil_y - emitter_y).max(0.0);
-        if h_ceil > 0.0 && h_ceil < ceil_reach {
-            let atten = (1.0 - h_ceil / ceil_reach).powi(2);
-            let r_ceil = (ceil_reach * ceil_reach - h_ceil * h_ceil).sqrt().max(base_radius * 0.45);
-            halos.push(HaloInstance {
-                center: [x0, ceil_y - 0.35, z0],
-                radius: r_ceil,
-                axis_u: [1.0, 0.0, 0.0],
-                _pad0: 0.0,
-                axis_v: [0.0, 0.0, 1.0],
-                _pad1: 0.0,
-                color: [base_color[0], base_color[1], base_color[2], base_color[3] * atten],
-            });
-        }
-    }
-
-    // 3. Wall halos: check lines of this sector and adjacent sectors
-    if sector.lines.is_null() || sector.linecount <= 0 {
-        return;
-    }
-
-    let mut checked: [usize; 64] = [0; 64];
-    let mut num_checked = 0;
-
-    let mut sectors_to_check: [*mut sector_t; 4] = [std::ptr::null_mut(); 4];
-    sectors_to_check[0] = sector as *const sector_t as *mut sector_t;
-    let mut num_sectors = 1;
-
-    let line_ptrs = sector.lines as *mut *mut crate::doom::c_ffi::line_t;
-    for li in 0..sector.linecount.min(32) as usize {
-        let lp = *line_ptrs.add(li);
-        if lp.is_null() { continue; }
-        let line = &*lp;
-        if line.flags as i32 & crate::doom::c_ffi::LinedefFlag::TWOSIDED as i32 != 0 {
-            let fsec = line.frontsector as *mut sector_t;
-            let bsec = line.backsector as *mut sector_t;
-            let other = if fsec == (sector as *const sector_t as *mut sector_t) { bsec } else { fsec };
-            if !other.is_null() && num_sectors < sectors_to_check.len() && !sectors_to_check[..num_sectors].contains(&other) {
-                sectors_to_check[num_sectors] = other;
-                num_sectors += 1;
-            }
-        }
-    }
-
-    for si in 0..num_sectors {
-        let sec = &*sectors_to_check[si];
-        if sec.lines.is_null() || sec.linecount <= 0 { continue; }
-        let l_ptrs = sec.lines as *mut *mut crate::doom::c_ffi::line_t;
-        for li in 0..sec.linecount.min(32) as usize {
-            let lp = *l_ptrs.add(li);
-            if lp.is_null() { continue; }
-            let l_addr = lp as usize;
-            if checked[..num_checked].contains(&l_addr) {
-                continue;
-            }
-            if num_checked < checked.len() {
-                checked[num_checked] = l_addr;
-                num_checked += 1;
-            }
-
-            let line = &*lp;
-            if line.v1.is_null() || line.v2.is_null() { continue; }
-            let v1 = &*line.v1;
-            let v2 = &*line.v2;
-
-            let is_twosided = (line.flags as i32 & crate::doom::c_ffi::LinedefFlag::TWOSIDED as i32) != 0;
-            if is_twosided {
-                let fsec = line.frontsector as *mut sector_t;
-                let bsec = line.backsector as *mut sector_t;
-                if !fsec.is_null() && !bsec.is_null() {
-                    let fh1 = (*fsec).floorheight;
-                    let fh2 = (*bsec).floorheight;
-                    let ch1 = (*fsec).ceilingheight;
-                    let ch2 = (*bsec).ceilingheight;
-                    if fh1 == fh2 && ch1 == ch2 {
-                        continue;
-                    }
-                }
-            }
-
-            let ax = fx(v1.x);
-            let az = -fx(v1.y);
-            let bx = fx(v2.x);
-            let bz = -fx(v2.y);
-
-            let dx = bx - ax;
-            let dz = bz - az;
-            let len = (dx * dx + dz * dz).sqrt();
-            if len < 0.1 { continue; }
-
-            let tx = dx / len;
-            let tz = dz / len;
-
-            let n_front_x = -tz;
-            let n_front_z = tx;
-
-            let wax = x0 - ax;
-            let waz = z0 - az;
-
-            let side_dot = wax * n_front_x + waz * n_front_z;
-            let (nx, nz, wall_tx, wall_tz) = if side_dot >= 0.0 {
-                (n_front_x, n_front_z, tx, tz)
-            } else {
-                if !is_twosided {
-                    continue;
-                }
-                (-n_front_x, -n_front_z, -tx, -tz)
-            };
-
-            let t = wax * tx + waz * tz;
-            if t < -base_radius || t > len + base_radius {
-                continue;
-            }
-            let t_clamped = t.clamp(0.0, len);
-            let qx = ax + tx * t_clamped;
-            let qz = az + tz * t_clamped;
-
-            let dist_sq = (x0 - qx).powi(2) + (z0 - qz).powi(2);
-            if dist_sq >= base_radius * base_radius {
-                continue;
-            }
-            let dist = dist_sq.sqrt();
-            let perp_dist = (x0 - qx) * nx + (z0 - qz) * nz;
-            if perp_dist < -1.0 {
-                continue;
-            }
-
-            let atten = (1.0 - dist / base_radius).powi(2);
-            if atten < 0.02 {
-                continue;
-            }
-            let r_wall = (base_radius * base_radius - dist_sq).sqrt().max(base_radius * 0.45);
-
-            let center_x = qx + nx * 0.35;
-            let center_z = qz + nz * 0.35;
-            let (center_y, r_wall) = if th.sprite == SPR_BAR1 {
-                let mid_y = ((emitter_y + ceil_y) * 0.5).min(ceil_y - 4.0);
-                let span = ((ceil_y - emitter_y) * 0.65).max(r_wall);
-                (mid_y, span)
-            } else {
-                (emitter_y.clamp(floor_y + 8.0, ceil_y - 8.0), r_wall)
-            };
-
-            halos.push(HaloInstance {
-                center: [center_x, center_y, center_z],
-                radius: r_wall,
-                axis_u: [wall_tx, 0.0, wall_tz],
-                _pad0: 0.0,
-                axis_v: [0.0, 1.0, 0.0],
-                _pad1: 0.0,
-                color: [base_color[0], base_color[1], base_color[2], base_color[3] * atten],
-            });
-        }
-    }
+    halos.push(HaloInstance {
+        center: [x0, floor_y + 0.35, z0],
+        radius: base_radius,
+        axis_u: [1.0, 0.0, 0.0],
+        _pad0: 0.0,
+        axis_v: [0.0, 0.0, 1.0],
+        _pad1: 0.0,
+        color: base_color,
+    });
 }
 
 pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbeBuffer) {
@@ -1742,11 +1525,11 @@ pub(crate) unsafe fn push_thing_light_probe(th: &mobj_t, probes: &mut LightProbe
     } else if th.sprite == SPR_BEXP {
         // Barrel explosion: expanding fiery blast
         match frame_idx {
-            0 => (80.0, [1.0, 0.90, 0.25], 0.0),
-            1 => (120.0, [1.0, 0.75, 0.15], 0.0),
-            2 => (160.0, [1.0, 0.55, 0.10], 0.0),
-            3 => (180.0, [0.85, 0.35, 0.05], 0.0),
-            _ => (190.0, [0.50, 0.20, 0.05], 0.0),
+            0 => (100.0, [1.2, 0.95, 0.30], 0.0),
+            1 => (150.0, [1.2, 0.80, 0.20], 0.0),
+            2 => (180.0, [1.0, 0.60, 0.10], 0.0),
+            3 => (200.0, [0.85, 0.35, 0.05], 0.0),
+            _ => (210.0, [0.50, 0.20, 0.05], 0.0),
         }
     } else if th.sprite == SPR_MISL {
         if frame_idx == 0 {
@@ -2818,33 +2601,36 @@ mod tests {
         assert!(p.color_dir[1] > p.color_dir[0]); // green dominant
         assert_eq!(p.color_dir[3], 1.0); // upward directional emission
 
-        // Barrel explosion: expanding fiery yellow/orange halo on floor AND wall
-        halos.clear();
+        // Barrel explosion: expanding fiery yellow/orange 3D light probe with 360 normal-aware shading
+        probe_buf = super::LightProbeBuffer::default();
         th.sprite = SPR_BEXP;
         th.frame = 0;
-        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert!(halos.len() >= 2);
-        assert!(halos[0].color[0] >= 0.9 && halos[0].color[1] >= 0.8); // yellow flash
-        assert!(halos[1].color[0] >= 0.9 && halos[1].color[1] >= 0.8);
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        let exp_p = probe_buf.probes[0];
+        assert!(exp_p.color_dir[0] >= 0.9 && exp_p.color_dir[1] >= 0.8); // yellow flash
+        assert_eq!(exp_p.color_dir[3], 0.0); // omnidirectional 360 normal-aware
 
-        // Rocket in flight
-        halos.clear();
+        // Rocket in flight: emits directional 3D light probe
+        probe_buf = super::LightProbeBuffer::default();
         th.sprite = SPR_MISL;
         th.frame = 0;
-        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert!(!halos.is_empty());
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
 
-        // Plasma in flight: blue halo
-        halos.clear();
+        // Plasma in flight: emits 3D light probe
+        probe_buf = super::LightProbeBuffer::default();
         th.sprite = SPR_PLSS;
-        unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
-        assert!(halos[0].color[2] > halos[0].color[0]); // blue dominant
+        unsafe { super::push_thing_light_probe(&th, &mut probe_buf) };
+        assert_eq!(probe_buf.meta[0], 1);
+        assert!(probe_buf.probes[0].color_dir[2] > probe_buf.probes[0].color_dir[0]); // blue dominant
 
-        // Armor pickup: blue halo
+        // Armor pickup: blue floor halo decal
         halos.clear();
         th.sprite = SPR_ARM1;
         th.flags = MF_SPECIAL;
         unsafe { super::push_thing_halos(&th, &sector, &mut halos) };
+        assert_eq!(halos.len(), 1);
         assert!(halos[0].color[2] > halos[0].color[0]);
     }
 }
