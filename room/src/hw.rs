@@ -12,7 +12,7 @@ use crate::doom::am_map::automapactive;
 use crate::doom::c_ffi::{sector_t, seg_t, side_t, subsector_t, vertex_t, LinedefFlag};
 use crate::doom::d_player::{consoleplayer, players, PspdefT, MAXPLAYERS, NUMPSPRITES};
 use crate::doom::i_video::{hw_palette_rgb, SCREENHEIGHT, SCREENWIDTH};
-use crate::doom::info::State;
+use crate::doom::info::{State, SPR_BEXP};
 use crate::doom::m_menu::menuactive;
 use crate::doom::p_setup::{
     nodes, numnodes, numsectors, numsegs, numsubsectors, numvertexes, sectors, segs, subsectors,
@@ -1449,7 +1449,9 @@ unsafe fn push_sprites(
                 continue;
             }
             let mut light = (sector.lightlevel as f32 / 255.0).clamp(0.04, 1.0);
-            if th.frame & FF_FULLBRIGHT != 0 {
+            if th.sprite == SPR_BEXP {
+                light = 2.0;
+            } else if th.frame & FF_FULLBRIGHT != 0 {
                 light = 1.0;
             } else if th.flags & MF_SHADOW != 0 {
                 light = 0.18;
