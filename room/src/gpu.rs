@@ -1225,7 +1225,7 @@ impl Default for TraceSettings {
             ssao_radius: 24.0,
             bounce_boost: 1.8,
             baked_light: true,
-            diminish: 0.75,
+            diminish: 2.25,
             light_blend: 0.75,
             voxel_blend: 0.75,
         }
