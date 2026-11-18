@@ -1203,7 +1203,7 @@ impl Default for TraceSettings {
             height: 720,
             world_space: true,
             flashlight: 0.0,
-            min_light: 0.0,
+            min_light: 0.08,
             max_light: 2.0,
             doom_res: true,
             msaa: false,
@@ -1221,13 +1221,13 @@ impl Default for TraceSettings {
             ssrc: false,
             ssrc_strength: 1.0,
             ssao: true,
-            ssao_strength: 1.0,
+            ssao_strength: 0.65,
             ssao_radius: 24.0,
             bounce_boost: 1.8,
             baked_light: true,
-            diminish: 2.25,
-            light_blend: 0.75,
-            voxel_blend: 0.75,
+            diminish: 0.75,
+            light_blend: 0.85,
+            voxel_blend: 0.85,
         }
     }
 }
