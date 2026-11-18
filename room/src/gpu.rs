@@ -1226,8 +1226,8 @@ impl Default for TraceSettings {
             bounce_boost: 1.8,
             baked_light: true,
             diminish: 0.75,
-            light_blend: 0.85,
-            voxel_blend: 0.85,
+            light_blend: 0.70,
+            voxel_blend: 0.2,
         }
     }
 }
