@@ -1,10 +1,10 @@
 {
-  "version": "921c5a5529a3cc93",
-  "sourceSha256": "3b587c02fed8aa860a834188e6c25ad015fa9e295d1d75a5325503e055183cb7",
+  "version": "003f577ff4aeab43",
+  "sourceSha256": "5d17bcf76251d12f6ffd75002c4a5068073e3c8d3b5267fcc7129eb5b4594959",
   "bakes": {
     "light_e1m1_418868fd2c508de1.rmlt": {
-      "nativeSha256": "2acb8e1bdb97e2524ca1a4a6b31ef3a4f8f4b0b4afd9d146de010894eec530ce",
-      "nativeBytes": 54463400
+      "nativeSha256": "d1f4a009f64c3eb00e8b4ad6801af0fe9c8d77baf1f09a14b8b4ab309471559e",
+      "nativeBytes": 54467876
     },
     "light_e1m2_d4897360a36456a0.rmlt": {
       "nativeSha256": "045db2920bdce12c650151ee2e88bbd30a70195c95ce863e3169c1d5fe9763db",
@@ -24,11 +24,11 @@
     "LICENSE": "edaef632cbb643e4e7a221717a6c441a4c1a7c918e6e4d56debc3d8739b233f6",
     "LICENSE-DOOM1": "3b1e13d2554dca18d35f8dfc13c95f7421af17ff2163355892f08e20ac472cc3",
     "NOTICE.md": "f081f6f2158d7778cbc6025a5379688abe6a3e88aedc6cdb200c3b32c90c6630",
-    "assets/921c5a5529a3cc93/index.js": "786f7d9be9b30c67478ac2edb112c790e414452705a3ce651951be377e3161f4",
-    "assets/921c5a5529a3cc93/pkg/room.js": "ac7d069b1d1d3c8ca3777263eee661411fb9f49219ded68d33134931f2933a2b",
-    "assets/921c5a5529a3cc93/pkg/room_bg.wasm": "8853505963cb75eee53ff8c998344870216794f3dabdb3326cd75186641bbd79",
-    "index.html": "f192fca1c26a3ed212e92d5cf07d571f47f9212d569e5dcfea682c4b66a15f15",
-    "light/light_e1m1_418868fd2c508de1.rmlt": "6e478565c109db6c7254f51eb7733dec1530077e75e43a9e1bff5eca7d868a5b",
+    "assets/003f577ff4aeab43/index.js": "786f7d9be9b30c67478ac2edb112c790e414452705a3ce651951be377e3161f4",
+    "assets/003f577ff4aeab43/pkg/room.js": "ac7d069b1d1d3c8ca3777263eee661411fb9f49219ded68d33134931f2933a2b",
+    "assets/003f577ff4aeab43/pkg/room_bg.wasm": "cac217f0dbea83bf401bc319950c84fedb54c358b258dd542258afc6f639f3a3",
+    "index.html": "e13013295930b300599384e5f18c769ec34b326bcf843fa040afffa5f2be7777",
+    "light/light_e1m1_418868fd2c508de1.rmlt": "2b6f47ac4eb68bf26c594316aea09634726b48a76549a2e0391ea0bc199ce4f3",
     "light/light_e1m2_d4897360a36456a0.rmlt": "e0b624cc7adab23a0a511e0f85a6499fe2e0dea0bbc829caab1611838c977b9e",
     "light/light_e1m3_e7ceee46f084e500.rmlt": "23e27370240b164b7d2259d9fefa76482dd7fe09a333be055f2201f5954a9f21",
     "light/light_e1m5_afeecbbab6c8cd65.rmlt": "7a397146f8657e01d155efc0ee9a0a4659095fe9e885871285dc6f0d1c079747",
