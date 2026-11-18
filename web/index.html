@@ -22,6 +22,113 @@
       image-rendering: crisp-edges;
     }
 
+    #controls {
+      position: fixed;
+      top: 12px;
+      right: 12px;
+      z-index: 10;
+      width: 220px;
+      box-sizing: border-box;
+      background: rgba(18, 18, 18, 0.82);
+      backdrop-filter: blur(8px);
+      border: 1px solid rgba(80, 80, 80, 0.45);
+      border-radius: 6px;
+      padding: 8px 10px;
+      color: #ccc;
+      font: 11px/1.3 monospace;
+      user-select: none;
+      box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+    }
+
+    #controls-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 6px;
+      font-size: 10px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      color: #888;
+    }
+
+    #btn-toggle-panel {
+      background: transparent;
+      border: 1px solid #444;
+      color: #888;
+      border-radius: 3px;
+      padding: 0 5px;
+      font: 10px monospace;
+      cursor: pointer;
+    }
+
+    #btn-toggle-panel:hover {
+      color: #fff;
+      border-color: #777;
+    }
+
+    #controls-buttons {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 4px;
+      margin-bottom: 8px;
+    }
+
+    #controls-buttons button {
+      background: rgba(35, 35, 35, 0.85);
+      color: #bbb;
+      border: 1px solid #444;
+      border-radius: 4px;
+      padding: 4px 6px;
+      font: 10px monospace;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+
+    #controls-buttons button:hover {
+      background: rgba(55, 55, 55, 0.95);
+      color: #fff;
+      border-color: #888;
+    }
+
+    #controls-buttons button.active {
+      background: rgba(28, 100, 50, 0.85);
+      border-color: #3cb86b;
+      color: #fff;
+    }
+
+    #controls-sliders {
+      display: flex;
+      flex-direction: column;
+      gap: 5px;
+    }
+
+    .ctrl-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 6px;
+    }
+
+    .ctrl-label {
+      flex: 0 0 55px;
+      color: #999;
+    }
+
+    .ctrl-row input[type="range"] {
+      flex: 1 1 auto;
+      height: 12px;
+      margin: 0;
+      accent-color: #3b82f6;
+      cursor: pointer;
+    }
+
+    .ctrl-val {
+      flex: 0 0 28px;
+      text-align: right;
+      color: #eee;
+      font-variant-numeric: tabular-nums;
+    }
+
     #status {
       position: fixed;
       left: 12px;
@@ -37,6 +144,59 @@
 </head>
 
 <body>
+  <div id="controls">
+    <div id="controls-header">
+      <span>CONTROLS</span>
+      <button id="btn-toggle-panel" title="Minimize controls">−</button>
+    </div>
+    <div id="controls-body">
+      <div id="controls-buttons">
+        <button id="btn-bake" title="Toggle baked raytraced lightmap ([ or F6)">Bake: ON</button>
+        <button id="btn-pause" title="Pause / unpause scene (P or M)">Pause: OFF</button>
+        <button id="btn-ssrc" title="Toggle Screen-Space Radiance Cascades (] or F5)">SSRC: OFF</button>
+        <button id="btn-clear-visible" title="Clear visible light and rebake (F8)">Clear</button>
+        <button id="btn-msaa" title="Toggle 4× hardware MSAA (\ or F7)">MSAA: OFF</button>
+        <button id="btn-smaa" title="Toggle post-pixelization SMAA (0)">SMAA: OFF</button>
+      </div>
+      <div id="controls-sliders">
+        <div class="ctrl-row" title="Blend between classic Doom lighting (0.0) and raytraced baked lighting (1.0)">
+          <span class="ctrl-label">Blend</span>
+          <input id="slider-blend" type="range" min="0" max="1.0" step="0.05" value="0.85">
+          <span id="val-blend" class="ctrl-val">0.85</span>
+        </div>
+        <div class="ctrl-row" title="Blend between classic Doom lighting and baked lighting for voxel/actor objects">
+          <span class="ctrl-label">Objects</span>
+          <input id="slider-voxel-blend" type="range" min="0" max="1.0" step="0.05" value="0.85">
+          <span id="val-voxel-blend" class="ctrl-val">0.85</span>
+        </div>
+        <div class="ctrl-row" title="Classic distance light diminishing: near surfaces lit, far fall off">
+          <span class="ctrl-label">Diminish</span>
+          <input id="slider-diminish" type="range" min="0" max="3.0" step="0.05" value="0.75">
+          <span id="val-diminish" class="ctrl-val">0.75</span>
+        </div>
+        <div class="ctrl-row" title="Light bounce boost factor for raytraced global illumination">
+          <span class="ctrl-label">Bounce</span>
+          <input id="slider-bounce" type="range" min="0.5" max="3.0" step="0.1" value="1.8">
+          <span id="val-bounce" class="ctrl-val">1.80</span>
+        </div>
+        <div class="ctrl-row" title="Surface bump map normal strength">
+          <span class="ctrl-label">Bump</span>
+          <input id="slider-normal" type="range" min="0" max="2.5" step="0.1" value="1.0">
+          <span id="val-normal" class="ctrl-val">1.00</span>
+        </div>
+        <div class="ctrl-row" title="Surface roughness scale">
+          <span class="ctrl-label">Rough</span>
+          <input id="slider-roughness" type="range" min="0.1" max="2.0" step="0.1" value="1.0">
+          <span id="val-roughness" class="ctrl-val">1.00</span>
+        </div>
+        <div class="ctrl-row" title="Screen-Space Radiance Cascades emission & secondary bounce strength">
+          <span class="ctrl-label">SSRC</span>
+          <input id="slider-ssrc" type="range" min="0" max="2.5" step="0.1" value="1.0">
+          <span id="val-ssrc" class="ctrl-val">1.00</span>
+        </div>
+      </div>
+    </div>
+  </div>
   <canvas id="doom-canvas" width="640" height="400" tabindex="0"></canvas>
   <div id="status">Loading…</div>
   <script type="module" src="index.js"></script>
