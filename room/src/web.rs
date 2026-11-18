@@ -649,3 +649,26 @@ pub fn get_voxel_blend() -> f32 {
         gpu.as_ref().map_or(0.2, |g| g.voxel_blend())
     })
 }
+
+#[wasm_bindgen]
+pub fn toggle_automap() -> bool {
+    unsafe {
+        if crate::doom::g_game::gamestate == 0 {
+            if crate::doom::am_map::automapactive != 0 {
+                crate::doom::g_game::viewactive = 1;
+                crate::doom::am_map::AM_Stop();
+            } else {
+                crate::doom::am_map::AM_Start();
+                crate::doom::g_game::viewactive = 0;
+            }
+            crate::doom::am_map::automapactive != 0
+        } else {
+            false
+        }
+    }
+}
+
+#[wasm_bindgen]
+pub fn is_automap_active() -> bool {
+    unsafe { crate::doom::am_map::automapactive != 0 }
+}

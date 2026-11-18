@@ -90,6 +90,14 @@ export function get_voxel_blend() {
 /**
  * @returns {boolean}
  */
+export function is_automap_active() {
+    const ret = wasm.is_automap_active();
+    return ret !== 0;
+}
+
+/**
+ * @returns {boolean}
+ */
 export function is_baked_light_enabled() {
     const ret = wasm.is_baked_light_enabled();
     return ret !== 0;
@@ -267,6 +275,14 @@ export function start_doom(canvas_id, custom_wad) {
     if (ret[1]) {
         throw takeFromExternrefTable0(ret[0]);
     }
+}
+
+/**
+ * @returns {boolean}
+ */
+export function toggle_automap() {
+    const ret = wasm.toggle_automap();
+    return ret !== 0;
 }
 
 /**

@@ -152,6 +152,7 @@
     <div id="controls-body">
       <div id="controls-buttons">
         <button id="btn-bake" title="Toggle baked raytraced lightmap ([ or F6)">Bake: ON</button>
+        <button id="btn-map" title="Toggle automap (Tab)">Map: OFF</button>
         <button id="btn-pause" title="Pause / unpause scene (P or M)">Pause: OFF</button>
         <button id="btn-ssrc" title="Toggle Screen-Space Radiance Cascades (] or F5)">SSRC: OFF</button>
         <button id="btn-clear-visible" title="Clear visible light and rebake (F8)">Clear</button>
@@ -171,7 +172,7 @@
         </div>
         <div class="ctrl-row" title="Classic distance light diminishing: near surfaces lit, far fall off">
           <span class="ctrl-label">Diminish</span>
-          <input id="slider-diminish" type="range" min="0" max="3.0" step="0.05" value="0.75">
+          <input id="slider-diminish" type="range" min="0" max="1.0" step="0.05" value="0.75">
           <span id="val-diminish" class="ctrl-val">0.75</span>
         </div>
         <div class="ctrl-row" title="Light bounce boost factor for raytraced global illumination">
