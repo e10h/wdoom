@@ -116,7 +116,7 @@ struct Camera {
     fill: vec4<f32>,
     // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
-    // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked); y: texture scale (1.0 = normal, 0.5 = half size).
+    // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked); y: texture resolution scale (1.0 = normal 100% res, 0.5 = 50% res, e.g. 64x64 -> 32x32).
     extra: vec4<f32>,
     probe_meta: vec4<u32>,
     probes: array<LightProbe, 64>,
@@ -241,8 +241,12 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     }
     var tile = in.uv;
     if (in.surface <= 1.5) {
-        let scale = select(1.0, camera.extra.y, camera.extra.y > 0.01);
-        tile = fract(in.uv / scale);
+        tile = fract(in.uv);
+    }
+    if (camera.extra.y > 0.01 && camera.extra.y < 0.99) {
+        let atlas_size = vec2<f32>(textureDimensions(atlas_tex));
+        let tex_dim = max(vec2<f32>(1.0), floor(abs(in.atlas.zw - in.atlas.xy) * atlas_size * camera.extra.y));
+        tile = (floor(tile * tex_dim) + 0.5) / tex_dim;
     }
     let atlas_uv = vec2<f32>(
         mix(in.atlas.x, in.atlas.z, tile.x),
@@ -325,9 +329,15 @@ fn fs_weapon(in: VertexOutput) -> @location(0) vec4<f32> {
     if (in.uv.x < 0.0 || in.uv.x > 1.0 || in.uv.y < 0.0 || in.uv.y > 1.0) {
         discard;
     }
+    var uv = in.uv;
+    if (camera.extra.y > 0.01 && camera.extra.y < 0.99) {
+        let atlas_size = vec2<f32>(textureDimensions(atlas_tex));
+        let tex_dim = max(vec2<f32>(1.0), floor(abs(in.atlas.zw - in.atlas.xy) * atlas_size * camera.extra.y));
+        uv = (floor(uv * tex_dim) + 0.5) / tex_dim;
+    }
     let atlas_uv = vec2<f32>(
-        mix(in.atlas.x, in.atlas.z, in.uv.x),
-        mix(in.atlas.y, in.atlas.w, in.uv.y),
+        mix(in.atlas.x, in.atlas.z, uv.x),
+        mix(in.atlas.y, in.atlas.w, uv.y),
     );
     let color = textureSampleLevel(atlas_tex, atlas_samp, atlas_uv, 0.0);
     if (color.a < 0.5) {
@@ -1368,7 +1378,6 @@ pub struct GpuState {
     /// True when the GPU light map has samples that are not on disk yet.
     light_bake_dirty: bool,
     pending_clear_visible: bool,
-    pending_clear_box: Option<[f32; 4]>,
     /// Last time a bake copy was started. Periodic saves stay off the hot path.
     light_bake_saved: Option<std::time::Instant>,
     /// Non-blocking readback / background write of a light bake.
@@ -1783,7 +1792,6 @@ impl GpuState {
             light_bake_key: None,
             light_bake_dirty: false,
             pending_clear_visible: false,
-            pending_clear_box: None,
             light_bake_saved: None,
             #[cfg(not(target_arch = "wasm32"))]
             light_bake_job: None,
@@ -2155,20 +2163,12 @@ impl GpuState {
             );
             if store_light {
                 if let Some(world) = self.world.as_ref() {
-                    let chisel_rect = if self.pending_clear_visible {
-                        self.pending_clear_box.take().unwrap_or([0.0, 0.0, 0.0, 0.0])
-                    } else {
-                        [0.0, 0.0, 0.0, 0.0]
-                    };
                     let params = BinParams {
                         pixels: rw * rh,
                         light_size: crate::hw::LIGHTMAP_SIZE,
                         slots: LIGHT_SLOTS,
                         voxel_rows: (crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32 & 0xffff)
                             | (FRAME.load(std::sync::atomic::Ordering::Relaxed) << 16),
-                        chisel_rect,
-                        screen_size: [rw as f32, rh as f32],
-                        _pad: [0.0, 0.0],
                     };
                     self.queue.write_buffer(
                         &world.light_bins.as_ref().expect("native light bins").uniform,
@@ -3227,22 +3227,6 @@ impl GpuState {
         self.accum_key = None;
         self.light_bake_dirty = true;
         log::info!("clearing visible lightmap texels for selective rebake");
-    }
-
-    /// Clear only the lightmap texels within a normalized screen bounding box [min_x, min_y, max_x, max_y].
-    pub fn clear_box(&mut self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) {
-        self.trace.mode = TraceMode::Bake;
-        crate::hw::set_bake_safe(true);
-        let x0 = min_x.min(max_x).clamp(0.0, 1.0);
-        let y0 = min_y.min(max_y).clamp(0.0, 1.0);
-        let x1 = min_x.max(max_x).clamp(0.0, 1.0);
-        let y1 = min_y.max(max_y).clamp(0.0, 1.0);
-        self.pending_clear_box = Some([x0, y0, x1, y1]);
-        self.pending_clear_visible = true;
-        self.accum_count = 0;
-        self.accum_key = None;
-        self.light_bake_dirty = true;
-        log::info!("clearing chisel box [{x0:.3}, {y0:.3}] - [{x1:.3}, {y1:.3}]");
     }
 
     pub fn normal_strength(&self) -> f32 {
@@ -5491,9 +5475,6 @@ struct BinParams {
     light_size: u32,
     slots: u32,
     voxel_rows: u32,
-    chisel_rect: [f32; 4],
-    screen_size: [f32; 2],
-    _pad: [f32; 2],
 }
 
 const LIGHT_BIN_SHADER: &str = r#"
@@ -5509,9 +5490,6 @@ struct BinParams {
     light_size: u32,
     slots: u32,
     voxel_rows: u32,
-    chisel_rect: vec4<f32>,
-    screen_size: vec2<f32>,
-    _pad: vec2<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> light_hits: array<LightHit>;
@@ -5614,14 +5592,6 @@ fn cs_clear_visible(@builtin(global_invocation_id) id: vec3<u32>) {
     let hit = light_hits[i];
     if (hit.packed == 0u) {
         return;
-    }
-    if (params.chisel_rect.z > params.chisel_rect.x && params.chisel_rect.w > params.chisel_rect.y) {
-        let px = f32(i % u32(params.screen_size.x)) / params.screen_size.x;
-        let py = f32(i / u32(params.screen_size.x)) / params.screen_size.y;
-        if (px < params.chisel_rect.x || px > params.chisel_rect.z ||
-            py < params.chisel_rect.y || py > params.chisel_rect.w) {
-            return;
-        }
     }
     let texel = hit.packed - 1u;
     let side = params.light_size;
