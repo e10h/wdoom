@@ -116,7 +116,7 @@ struct Camera {
     fill: vec4<f32>,
     // x: normal strength; y: roughness scale; z: specular sheen; w: OG Doom distance light diminishing.
     pbr: vec4<f32>,
-    // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked).
+    // x: object/voxel bake blend factor (0.0 = 100% OG Doom, 1.0 = 100% Baked); y: texture scale (1.0 = normal, 0.5 = half size).
     extra: vec4<f32>,
     probe_meta: vec4<u32>,
     probes: array<LightProbe, 64>,
@@ -241,7 +241,8 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     }
     var tile = in.uv;
     if (in.surface <= 1.5) {
-        tile = fract(in.uv);
+        let scale = select(1.0, camera.extra.y, camera.extra.y > 0.01);
+        tile = fract(in.uv / scale);
     }
     let atlas_uv = vec2<f32>(
         mix(in.atlas.x, in.atlas.z, tile.x),
@@ -1191,6 +1192,8 @@ pub(crate) struct TraceSettings {
     pub(crate) light_blend: f32,
     /// Blend between normal Doom lighting (0.0) and raytraced baked lighting (1.0) for voxel/actor objects.
     pub(crate) voxel_blend: f32,
+    /// Texture scale multiplier for world surfaces (1.0 = normal, 0.5 = half size).
+    pub(crate) tex_scale: f32,
 }
 
 impl Default for TraceSettings {
@@ -1228,6 +1231,7 @@ impl Default for TraceSettings {
             diminish: 0.75,
             light_blend: 0.70,
             voxel_blend: 0.2,
+            tex_scale: 1.0,
         }
     }
 }
@@ -1364,6 +1368,7 @@ pub struct GpuState {
     /// True when the GPU light map has samples that are not on disk yet.
     light_bake_dirty: bool,
     pending_clear_visible: bool,
+    pending_clear_box: Option<[f32; 4]>,
     /// Last time a bake copy was started. Periodic saves stay off the hot path.
     light_bake_saved: Option<std::time::Instant>,
     /// Non-blocking readback / background write of a light bake.
@@ -1778,6 +1783,7 @@ impl GpuState {
             light_bake_key: None,
             light_bake_dirty: false,
             pending_clear_visible: false,
+            pending_clear_box: None,
             light_bake_saved: None,
             #[cfg(not(target_arch = "wasm32"))]
             light_bake_job: None,
@@ -2010,7 +2016,7 @@ impl GpuState {
                 ],
                 extra: [
                     self.trace.voxel_blend,
-                    0.0,
+                    self.trace.tex_scale,
                     0.0,
                     0.0,
                 ],
@@ -2149,12 +2155,20 @@ impl GpuState {
             );
             if store_light {
                 if let Some(world) = self.world.as_ref() {
+                    let chisel_rect = if self.pending_clear_visible {
+                        self.pending_clear_box.take().unwrap_or([0.0, 0.0, 0.0, 0.0])
+                    } else {
+                        [0.0, 0.0, 0.0, 0.0]
+                    };
                     let params = BinParams {
                         pixels: rw * rh,
                         light_size: crate::hw::LIGHTMAP_SIZE,
                         slots: LIGHT_SLOTS,
                         voxel_rows: (crate::hw::VOXEL_LIGHT_ROWS.max(0) as u32 & 0xffff)
                             | (FRAME.load(std::sync::atomic::Ordering::Relaxed) << 16),
+                        chisel_rect,
+                        screen_size: [rw as f32, rh as f32],
+                        _pad: [0.0, 0.0],
                     };
                     self.queue.write_buffer(
                         &world.light_bins.as_ref().expect("native light bins").uniform,
@@ -3215,6 +3229,22 @@ impl GpuState {
         log::info!("clearing visible lightmap texels for selective rebake");
     }
 
+    /// Clear only the lightmap texels within a normalized screen bounding box [min_x, min_y, max_x, max_y].
+    pub fn clear_box(&mut self, min_x: f32, min_y: f32, max_x: f32, max_y: f32) {
+        self.trace.mode = TraceMode::Bake;
+        crate::hw::set_bake_safe(true);
+        let x0 = min_x.min(max_x).clamp(0.0, 1.0);
+        let y0 = min_y.min(max_y).clamp(0.0, 1.0);
+        let x1 = min_x.max(max_x).clamp(0.0, 1.0);
+        let y1 = min_y.max(max_y).clamp(0.0, 1.0);
+        self.pending_clear_box = Some([x0, y0, x1, y1]);
+        self.pending_clear_visible = true;
+        self.accum_count = 0;
+        self.accum_key = None;
+        self.light_bake_dirty = true;
+        log::info!("clearing chisel box [{x0:.3}, {y0:.3}] - [{x1:.3}, {y1:.3}]");
+    }
+
     pub fn normal_strength(&self) -> f32 {
         self.trace.normal_strength
     }
@@ -3332,6 +3362,14 @@ impl GpuState {
 
     pub fn set_voxel_blend(&mut self, val: f32) {
         self.trace.voxel_blend = val.clamp(0.0, 1.0);
+    }
+
+    pub fn tex_scale(&self) -> f32 {
+        self.trace.tex_scale
+    }
+
+    pub fn set_tex_scale(&mut self, val: f32) {
+        self.trace.tex_scale = if val <= 0.0 { 1.0 } else { val };
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
@@ -5453,6 +5491,9 @@ struct BinParams {
     light_size: u32,
     slots: u32,
     voxel_rows: u32,
+    chisel_rect: [f32; 4],
+    screen_size: [f32; 2],
+    _pad: [f32; 2],
 }
 
 const LIGHT_BIN_SHADER: &str = r#"
@@ -5468,6 +5509,9 @@ struct BinParams {
     light_size: u32,
     slots: u32,
     voxel_rows: u32,
+    chisel_rect: vec4<f32>,
+    screen_size: vec2<f32>,
+    _pad: vec2<f32>,
 }
 
 @group(0) @binding(0) var<storage, read> light_hits: array<LightHit>;
@@ -5571,6 +5615,14 @@ fn cs_clear_visible(@builtin(global_invocation_id) id: vec3<u32>) {
     if (hit.packed == 0u) {
         return;
     }
+    if (params.chisel_rect.z > params.chisel_rect.x && params.chisel_rect.w > params.chisel_rect.y) {
+        let px = f32(i % u32(params.screen_size.x)) / params.screen_size.x;
+        let py = f32(i / u32(params.screen_size.x)) / params.screen_size.y;
+        if (px < params.chisel_rect.x || px > params.chisel_rect.z ||
+            py < params.chisel_rect.y || py > params.chisel_rect.w) {
+            return;
+        }
+    }
     let texel = hit.packed - 1u;
     let side = params.light_size;
     let coord = vec2<i32>(i32(texel % side), i32(texel / side));
@@ -5666,7 +5718,7 @@ fn create_light_bins_sized(device: &wgpu::Device, light: &wgpu::Texture,
     });
     let uniform = device.create_buffer(&wgpu::BufferDescriptor {
         label: Some("doom_light_bin_params"),
-        size: 16,
+        size: std::mem::size_of::<BinParams>() as u64,
         usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     });

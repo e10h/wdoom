@@ -651,6 +651,35 @@ pub fn get_voxel_blend() -> f32 {
 }
 
 #[wasm_bindgen]
+pub fn toggle_tex_scale() -> f32 {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            let next = if (gpu.tex_scale() - 1.0).abs() < 0.05 { 0.5 } else { 1.0 };
+            gpu.set_tex_scale(next);
+            next
+        } else {
+            1.0
+        }
+    })
+}
+
+#[wasm_bindgen]
+pub fn get_tex_scale() -> f32 {
+    GPU.with_borrow(|gpu| {
+        gpu.as_ref().map_or(1.0, |g| g.tex_scale())
+    })
+}
+
+#[wasm_bindgen]
+pub fn set_tex_scale(val: f32) {
+    GPU.with_borrow_mut(|gpu| {
+        if let Some(gpu) = gpu.as_mut() {
+            gpu.set_tex_scale(val);
+        }
+    });
+}
+
+#[wasm_bindgen]
 pub fn toggle_automap() -> bool {
     unsafe {
         if crate::doom::g_game::gamestate == 0 {

@@ -1,4 +1,4 @@
-import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, set_ssrc, is_ssrc_enabled, toggle_ssrc, set_ssrc_strength, get_ssrc_strength, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen, set_bounce_boost, get_bounce_boost, set_baked_light, is_baked_light_enabled, toggle_baked_light, set_diminish, get_diminish, set_light_blend, get_light_blend, set_voxel_blend, get_voxel_blend, toggle_pause, is_paused, toggle_automap, is_automap_active } from './pkg/room.js';
+import init, { start_doom, toggle_msaa, set_msaa, is_msaa_enabled, toggle_smaa, set_smaa, is_smaa_enabled, set_ssrc, is_ssrc_enabled, toggle_ssrc, set_ssrc_strength, get_ssrc_strength, clear_visible, set_normal_strength, get_normal_strength, set_roughness_scale, get_roughness_scale, set_specular_sheen, get_specular_sheen, set_bounce_boost, get_bounce_boost, set_baked_light, is_baked_light_enabled, toggle_baked_light, set_diminish, get_diminish, set_light_blend, get_light_blend, set_voxel_blend, get_voxel_blend, toggle_pause, is_paused, toggle_automap, is_automap_active, toggle_tex_scale, get_tex_scale, set_tex_scale } from './pkg/room.js';
 
 window.toggle_pause = toggle_pause;
 window.is_paused = is_paused;
@@ -33,6 +33,9 @@ window.set_light_blend = set_light_blend;
 window.get_light_blend = get_light_blend;
 window.set_voxel_blend = set_voxel_blend;
 window.get_voxel_blend = get_voxel_blend;
+window.toggle_tex_scale = toggle_tex_scale;
+window.get_tex_scale = get_tex_scale;
+window.set_tex_scale = set_tex_scale;
 
 const canvas = document.getElementById('doom-canvas');
 const status = document.getElementById('status');
@@ -44,6 +47,7 @@ const btnSsrc = document.getElementById('btn-ssrc');
 const btnClearVisible = document.getElementById('btn-clear-visible');
 const btnMsaa = document.getElementById('btn-msaa');
 const btnSmaa = document.getElementById('btn-smaa');
+const btnTexScale = document.getElementById('btn-tex-scale');
 const btnTogglePanel = document.getElementById('btn-toggle-panel');
 const controlsBody = document.getElementById('controls-body');
 
@@ -89,6 +93,12 @@ function updateButtonStates() {
       const on = is_ssrc_enabled();
       btnSsrc.textContent = `SSRC: ${on ? 'ON' : 'OFF'}`;
       btnSsrc.classList.toggle('active', on);
+    }
+    if (btnTexScale) {
+      const scale = get_tex_scale();
+      const isHalf = Math.abs(scale - 0.5) < 0.05;
+      btnTexScale.textContent = `Tex: ${isHalf ? '50%' : '100%'}`;
+      btnTexScale.classList.toggle('active', isHalf);
     }
   } catch (_) {}
 }
@@ -150,6 +160,15 @@ if (btnSmaa) {
   btnSmaa.addEventListener('click', (e) => {
     e.stopPropagation();
     toggle_smaa();
+    updateButtonStates();
+    canvas.focus();
+  });
+}
+
+if (btnTexScale) {
+  btnTexScale.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggle_tex_scale();
     updateButtonStates();
     canvas.focus();
   });
