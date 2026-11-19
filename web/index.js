@@ -96,9 +96,16 @@ function updateButtonStates() {
     }
     if (btnTexScale) {
       const scale = get_tex_scale();
-      const isHalf = Math.abs(scale - 0.5) < 0.05;
-      btnTexScale.textContent = `Tex: ${isHalf ? '50%' : '100%'}`;
-      btnTexScale.classList.toggle('active', isHalf);
+      if (Math.abs(scale - 0.5) < 0.05) {
+        btnTexScale.textContent = 'Tex: 1/2';
+        btnTexScale.classList.add('active');
+      } else if (Math.abs(scale - 0.25) < 0.05) {
+        btnTexScale.textContent = 'Tex: 1/4';
+        btnTexScale.classList.add('active');
+      } else {
+        btnTexScale.textContent = 'Tex: 100%';
+        btnTexScale.classList.remove('active');
+      }
     }
   } catch (_) {}
 }
