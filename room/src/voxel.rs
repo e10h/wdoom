@@ -122,20 +122,32 @@ fn sprite_key(sprite: i32, frame: i32) -> Option<String> {
     Some(key)
 }
 
+static VOXEL_DOWNSAMPLE: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+pub fn set_voxel_downsample(d: usize) {
+    VOXEL_DOWNSAMPLE.store(d.max(1), std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn voxel_downsample() -> usize {
+    VOXEL_DOWNSAMPLE.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn mesh_for(file: &str) -> Option<Arc<VoxelMesh>> {
-    if let Some(found) = meshes().lock().ok()?.get(file) {
+    let d = voxel_downsample();
+    let key = (file.to_string(), d);
+    if let Some(found) = meshes().lock().ok()?.get(&key) {
         return found.clone();
     }
     let bytes = file_bytes(file)?;
-    let meshed = mesh_kvx(bytes).map(Arc::new);
+    let meshed = mesh_kvx(bytes, d).map(Arc::new);
     if let Ok(mut cache) = meshes().lock() {
-        cache.insert(file.to_string(), meshed.clone());
+        cache.insert(key, meshed.clone());
     }
     meshed
 }
 
-fn meshes() -> &'static Mutex<HashMap<String, Option<Arc<VoxelMesh>>>> {
-    static MESHES: OnceLock<Mutex<HashMap<String, Option<Arc<VoxelMesh>>>>> = OnceLock::new();
+fn meshes() -> &'static Mutex<HashMap<(String, usize), Option<Arc<VoxelMesh>>>> {
+    static MESHES: OnceLock<Mutex<HashMap<(String, usize), Option<Arc<VoxelMesh>>>>> = OnceLock::new();
     MESHES.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -231,7 +243,7 @@ fn field(body: &str, name: &str) -> f32 {
     num.parse().unwrap_or(0.0)
 }
 
-fn mesh_kvx(data: &[u8]) -> Option<VoxelMesh> {
+fn mesh_kvx(data: &[u8], d: usize) -> Option<VoxelMesh> {
     if data.len() < 28 {
         return None;
     }
@@ -296,9 +308,57 @@ fn mesh_kvx(data: &[u8]) -> Option<VoxelMesh> {
             }
         }
     }
-    let mut mesh = greedy(xs, ys, zs, &grid, xp, yp, zp);
+    let (dgrid, dxs, dys, dzs) = downsample_grid(&grid, xs, ys, zs, d);
+    let mut mesh = greedy(dxs, dys, dzs, &dgrid, xp, yp, zp, d as f32);
     mesh.palette = kvx_palette(data);
     Some(mesh)
+}
+
+fn downsample_grid(
+    grid: &[u16],
+    xs: usize,
+    ys: usize,
+    zs: usize,
+    d: usize,
+) -> (Vec<u16>, usize, usize, usize) {
+    if d <= 1 {
+        return (grid.to_vec(), xs, ys, zs);
+    }
+    let dxs = (xs + d - 1) / d;
+    let dys = (ys + d - 1) / d;
+    let dzs = (zs + d - 1) / d;
+    let mut dgrid = vec![0u16; dxs * dys * dzs];
+    for dz in 0..dzs {
+        let z_min = dz * d;
+        let z_max = (z_min + d).min(zs);
+        for dy in 0..dys {
+            let y_min = dy * d;
+            let y_max = (y_min + d).min(ys);
+            for dx in 0..dxs {
+                let x_min = dx * d;
+                let x_max = (x_min + d).min(xs);
+                let mut counts = [0u16; 257];
+                let mut best_color = 0u16;
+                let mut best_count = 0u16;
+                for z in z_min..z_max {
+                    for y in y_min..y_max {
+                        for x in x_min..x_max {
+                            let c = grid[(z * ys + y) * xs + x];
+                            if c > 0 && (c as usize) < counts.len() {
+                                counts[c as usize] += 1;
+                                if counts[c as usize] > best_count {
+                                    best_count = counts[c as usize];
+                                    best_color = c;
+                                }
+                            }
+                        }
+                    }
+                }
+                dgrid[(dz * dys + dy) * dxs + dx] = best_color;
+            }
+        }
+    }
+    (dgrid, dxs, dys, dzs)
 }
 
 /// The last 768 bytes are a 256-color VGA palette, components 0–63.
@@ -322,20 +382,20 @@ fn cell(grid: &[u16], xs: usize, ys: usize, x: usize, y: usize, z: usize) -> u16
     grid[(z * ys + y) * xs + x]
 }
 
-fn greedy(xs: usize, ys: usize, zs: usize, grid: &[u16], xp: f32, yp: f32, zp: f32) -> VoxelMesh {
+fn greedy(xs: usize, ys: usize, zs: usize, grid: &[u16], xp: f32, yp: f32, zp: f32, step: f32) -> VoxelMesh {
     let mut quads = Vec::new();
     // +X and -X, merged across Y and Z.
     for x in 0..xs {
-        grow_x(&mut quads, grid, xs, ys, zs, x, true, xp, yp, zp);
-        grow_x(&mut quads, grid, xs, ys, zs, x, false, xp, yp, zp);
+        grow_x(&mut quads, grid, xs, ys, zs, x, true, xp, yp, zp, step);
+        grow_x(&mut quads, grid, xs, ys, zs, x, false, xp, yp, zp, step);
     }
     for y in 0..ys {
-        grow_y(&mut quads, grid, xs, ys, zs, y, true, xp, yp, zp);
-        grow_y(&mut quads, grid, xs, ys, zs, y, false, xp, yp, zp);
+        grow_y(&mut quads, grid, xs, ys, zs, y, true, xp, yp, zp, step);
+        grow_y(&mut quads, grid, xs, ys, zs, y, false, xp, yp, zp, step);
     }
     for z in 0..zs {
-        grow_z(&mut quads, grid, xs, ys, zs, z, true, xp, yp, zp);
-        grow_z(&mut quads, grid, xs, ys, zs, z, false, xp, yp, zp);
+        grow_z(&mut quads, grid, xs, ys, zs, z, true, xp, yp, zp, step);
+        grow_z(&mut quads, grid, xs, ys, zs, z, false, xp, yp, zp, step);
     }
     VoxelMesh {
         quads,
@@ -354,6 +414,7 @@ fn grow_x(
     xp: f32,
     yp: f32,
     zp: f32,
+    step: f32,
 ) {
     let mut used = vec![false; ys * zs];
     for z in 0..zs {
@@ -387,13 +448,13 @@ fn grow_x(
                     used[zz * ys + yy] = true;
                 }
             }
-            let face = if positive { (x + 1) as f32 } else { x as f32 };
+            let face = if positive { (x + 1) as f32 * step } else { x as f32 * step };
             quads.push(quad(
                 [
-                    [face, y as f32, z as f32],
-                    [face, y1 as f32, z as f32],
-                    [face, y1 as f32, z1 as f32],
-                    [face, y as f32, z1 as f32],
+                    [face, y as f32 * step, z as f32 * step],
+                    [face, y1 as f32 * step, z as f32 * step],
+                    [face, y1 as f32 * step, z1 as f32 * step],
+                    [face, y as f32 * step, z1 as f32 * step],
                 ],
                 (color - 1) as u8,
                 xp,
@@ -434,6 +495,7 @@ fn grow_y(
     xp: f32,
     yp: f32,
     zp: f32,
+    step: f32,
 ) {
     let mut used = vec![false; xs * zs];
     for z in 0..zs {
@@ -467,13 +529,13 @@ fn grow_y(
                     used[zz * xs + xx] = true;
                 }
             }
-            let face = if positive { (y + 1) as f32 } else { y as f32 };
+            let face = if positive { (y + 1) as f32 * step } else { y as f32 * step };
             quads.push(quad(
                 [
-                    [x as f32, face, z as f32],
-                    [x1 as f32, face, z as f32],
-                    [x1 as f32, face, z1 as f32],
-                    [x as f32, face, z1 as f32],
+                    [x as f32 * step, face, z as f32 * step],
+                    [x1 as f32 * step, face, z as f32 * step],
+                    [x1 as f32 * step, face, z1 as f32 * step],
+                    [x as f32 * step, face, z1 as f32 * step],
                 ],
                 (color - 1) as u8,
                 xp,
@@ -514,6 +576,7 @@ fn grow_z(
     xp: f32,
     yp: f32,
     zp: f32,
+    step: f32,
 ) {
     let mut used = vec![false; xs * ys];
     for y in 0..ys {
@@ -547,14 +610,14 @@ fn grow_z(
                     used[yy * xs + xx] = true;
                 }
             }
-            let face = if positive { z as f32 } else { (z + 1) as f32 };
+            let face = if positive { z as f32 * step } else { (z + 1) as f32 * step };
             // File +Z is model down, so the upward face is the low file-z side.
             quads.push(quad(
                 [
-                    [x as f32, y as f32, face],
-                    [x1 as f32, y as f32, face],
-                    [x1 as f32, y1 as f32, face],
-                    [x as f32, y1 as f32, face],
+                    [x as f32 * step, y as f32 * step, face],
+                    [x1 as f32 * step, y as f32 * step, face],
+                    [x1 as f32 * step, y1 as f32 * step, face],
+                    [x as f32 * step, y1 as f32 * step, face],
                 ],
                 (color - 1) as u8,
                 xp,
@@ -601,7 +664,7 @@ mod tests {
     #[test]
     fn barrel_sits_on_its_pivot() {
         let bytes = include_bytes!("../assets/cheello/voxels/bar1a.kvx");
-        let mesh = mesh_kvx(bytes).expect("barrel");
+        let mesh = mesh_kvx(bytes, 1).expect("barrel");
         assert!(mesh.quads.len() > 50, "quads {}", mesh.quads.len());
         assert!(mesh.quads.len() < 2721 * 6, "quads {}", mesh.quads.len());
         let mut min_z = f32::MAX;
@@ -617,6 +680,12 @@ mod tests {
         // Index 15 is the barrel's most used color: black in the file palette,
         // a brown in PLAYPAL. Sampling PLAYPAL is what made the models look off.
         assert_eq!(mesh.palette[15], [0, 0, 0]);
+
+        // Downsampling reduces polygon count while preserving valid meshes
+        let mesh_half = mesh_kvx(bytes, 2).expect("barrel half");
+        assert!(mesh_half.quads.len() < mesh.quads.len());
+        let mesh_quarter = mesh_kvx(bytes, 4).expect("barrel quarter");
+        assert!(mesh_quarter.quads.len() < mesh_half.quads.len());
     }
 
     #[test]
@@ -633,7 +702,7 @@ mod tests {
     #[test]
     fn every_packed_kvx_meshes() {
         for (name, (at, len)) in files() {
-            let mesh = mesh_kvx(&blob()[*at..*at + *len]).unwrap_or_else(|| panic!("{name}"));
+            let mesh = mesh_kvx(&blob()[*at..*at + *len], 1).unwrap_or_else(|| panic!("{name}"));
             assert!(!mesh.quads.is_empty(), "{name}");
         }
     }

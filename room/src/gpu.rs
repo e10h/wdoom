@@ -263,8 +263,13 @@ fn fs_world(in: VertexOutput, @builtin(front_facing) front: bool) -> @location(0
     var incoming = doom_light;
     if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
         let dims = textureDimensions(light_tex);
+        var uv = in.light_uv;
+        if (camera.extra.y > 0.01 && camera.extra.y < 0.99) {
+            let light_dim = max(vec2<f32>(1.0), floor(vec2<f32>(dims) * camera.extra.y));
+            uv = (floor(uv * light_dim) + 0.5) / light_dim;
+        }
         let coord = clamp(
-            vec2<i32>(in.light_uv * vec2<f32>(dims)),
+            vec2<i32>(uv * vec2<f32>(dims)),
             vec2<i32>(0),
             vec2<i32>(dims) - vec2<i32>(1),
         );
@@ -417,8 +422,13 @@ fn fs_voxel(in: VoxelVertexOutput) -> @location(0) vec4<f32> {
     var incoming = doom_light;
     if (camera.fill.w < 0.5 && in.light_uv.x >= 0.0) {
         let dims = textureDimensions(light_tex);
+        var uv = in.light_uv;
+        if (camera.extra.y > 0.01 && camera.extra.y < 0.99) {
+            let light_dim = max(vec2<f32>(1.0), floor(vec2<f32>(dims) * camera.extra.y));
+            uv = (floor(uv * light_dim) + 0.5) / light_dim;
+        }
         let coord = clamp(
-            vec2<i32>(in.light_uv * vec2<f32>(dims)),
+            vec2<i32>(uv * vec2<f32>(dims)),
             vec2<i32>(0),
             vec2<i32>(dims) - vec2<i32>(1),
         );
@@ -3354,6 +3364,14 @@ impl GpuState {
 
     pub fn set_tex_scale(&mut self, val: f32) {
         self.trace.tex_scale = if val <= 0.0 { 1.0 } else { val };
+        let d = if (self.trace.tex_scale - 0.5).abs() < 0.05 {
+            2
+        } else if (self.trace.tex_scale - 0.25).abs() < 0.05 {
+            4
+        } else {
+            1
+        };
+        crate::voxel::set_voxel_downsample(d);
     }
 
     fn paint_ui(&mut self, encoder: &mut wgpu::CommandEncoder, view: &wgpu::TextureView) {
