@@ -1,9 +1,7 @@
 /target/
-.gitnexus
 *.log
 *.savegame
 *.json
-session-*.md
 *.bak
 
 /out/
