@@ -5,6 +5,5 @@ members = [
     "doomgeneric-sys",
     "libc-wasm",
     "room",
-    "neural-nr",
 ]
 resolver = "2"

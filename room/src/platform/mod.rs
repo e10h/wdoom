@@ -105,14 +105,6 @@ pub fn on_key(code: KeyCode, pressed: bool, repeat: bool) {
         }
         return;
     }
-    if matches!(code, KeyCode::Digit8 | KeyCode::Numpad8) {
-        if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.cycle_neural_mode();}});}
-        return;
-    }
-    if matches!(code, KeyCode::Digit9 | KeyCode::Numpad9) {
-        if pressed {GPU.with_borrow_mut(|gpu| {if let Some(gpu)=gpu.as_mut(){gpu.toggle_neural();}});}
-        return;
-    }
     if matches!(code, KeyCode::BracketRight | KeyCode::F5) {
         if pressed {
             GPU.with_borrow_mut(|gpu| {

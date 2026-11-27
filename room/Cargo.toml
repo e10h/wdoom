@@ -53,8 +53,6 @@ miniz_oxide = "0.8"
 dhat = { version = "0.3", optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Experimental native-only neural rendering; models remain external.
-neural-nr = { path = "../neural-nr" }
 # libc bindings for C FFI on native platforms
 libc = "0.2"
 # PNG brightmaps from the Brightmaps Plus pack.

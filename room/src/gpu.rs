@@ -1179,13 +1179,6 @@ pub(crate) struct TraceSettings {
     pub(crate) msaa: bool,
     /// Post-process edges before drawing the HUD.
     pub(crate) smaa: bool,
-    pub(crate) neural: bool,
-    pub(crate) neural_strength: f32,
-    pub(crate) neural_style: u32,
-    pub(crate) neural_mode: u32,
-    pub(crate) neural_split_x: f32,
-    pub(crate) neural_fsr: bool,
-    pub(crate) neural_sharpness: f32,
     /// Normal map perturbation multiplier (0.0 = flat, 1.0 = default, up to 2.5).
     pub(crate) normal_strength: f32,
     /// Roughness multiplier (0.1 = high gloss/mirror, 1.0 = authored, 2.0 = matte).
@@ -1231,13 +1224,6 @@ impl Default for TraceSettings {
             doom_res: true,
             msaa: false,
             smaa: false,
-            neural: false,
-            neural_strength: 1.0,
-            neural_style: 2,
-            neural_mode: 1,
-            neural_split_x: 0.5,
-            neural_fsr: true,
-            neural_sharpness: 0.8,
             normal_strength: 1.0,
             roughness_scale: 1.0,
             specular_sheen: 1.0,
@@ -1374,8 +1360,6 @@ pub struct GpuState {
     ray_image: Option<RayImage>,
     /// Offscreen raster play view when [`TraceSettings::doom_res`] is on.
     play_image: Option<PlayImage>,
-    #[cfg(not(target_arch = "wasm32"))]
-    nr_live: Option<neural::Live>,
     smaa_target: Option<(smaa::SmaaTarget, (u32, u32))>,
     ssrc_pass: Option<ssrc::SsrcPass>,
     ssao_pass: Option<ssao::SsaoPass>,
@@ -1485,13 +1469,7 @@ impl GpuState {
             .features()
             .contains(wgpu::Features::EXPERIMENTAL_RAY_QUERY);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        let want_nr = std::env::var_os("WDOOM_NR_MODEL").is_some()
-            && adapter_info.backend == wgpu::Backend::Metal
-            && adapter.features().contains(wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP | wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX);
-        #[cfg(target_arch = "wasm32")]
-        let want_nr = false;
-        let mut ray_limits = if want_rays {
+        let ray_limits = if want_rays {
             limits
                 .clone()
                 .using_acceleration_structure_values(adapter.limits())
@@ -1501,19 +1479,17 @@ impl GpuState {
         // Ray queries are still an experimental wgpu feature. The Metal backend
         // on this machine implements them; agreeing to the token is required
         // before the device will enable `EXPERIMENTAL_RAY_QUERY`.
-        if want_nr {ray_limits.max_compute_workgroup_storage_size=32768;}
-        let experimental = if want_rays || want_nr {
+        let experimental = if want_rays {
             unsafe { wgpu::ExperimentalFeatures::enabled() }
         } else {
             wgpu::ExperimentalFeatures::default()
         };
-        let mut ray_features = if want_rays {
+        let ray_features = if want_rays {
             wgpu::Features::EXPERIMENTAL_RAY_QUERY
         } else {
             wgpu::Features::empty()
         };
 
-        if want_nr {ray_features |= wgpu::Features::SHADER_F16 | wgpu::Features::SUBGROUP | wgpu::Features::EXPERIMENTAL_COOPERATIVE_MATRIX;}
         let requested = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("doom_device"),
@@ -1793,8 +1769,6 @@ impl GpuState {
             smaa_target: None,
             ssrc_pass: None,
             ssao_pass: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            nr_live: None,
             blit,
             accum,
             #[cfg(not(target_arch = "wasm32"))]
@@ -1806,27 +1780,6 @@ impl GpuState {
             #[cfg(not(target_arch = "wasm32"))]
             light_bake_job: None,
         })
-    }
-
-    pub(crate) fn toggle_neural(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {self.trace.neural = !self.trace.neural;log::info!("Neural rendering {}",if self.trace.neural {"on"}else{"off"});}
-    }
-
-    #[allow(dead_code)]
-    pub(crate) fn cycle_neural_mode(&mut self) {
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            self.trace.neural_mode = (self.trace.neural_mode + 1) % 3;
-            log::info!(
-                "Neural mode: {}",
-                match self.trace.neural_mode {
-                    0 => "Split Comparison",
-                    1 => "Full DLSS-NR",
-                    _ => "Full Native 3D",
-                }
-            );
-        }
     }
 
     pub(crate) fn toggle_smaa(&mut self) -> bool {
@@ -2113,25 +2066,10 @@ impl GpuState {
         let view = output
             .texture
             .create_view(&wgpu::TextureViewDescriptor::default());
-        #[cfg(not(target_arch = "wasm32"))]
-        if self.trace.neural && self.trace.playing() {
-            if let Some(nr) = self.nr_live.as_mut() {
-                nr.resize(self.config.format,(self.config.width,self.config.height));
-            } else {
-                match neural::Live::new(&self.device,&self.queue,self.config.format,(self.config.width,self.config.height),vw/vh) {
-                    Ok(nr)=>self.nr_live=Some(nr),
-                    Err(e)=>{log::error!("Neural rendering disabled: {e}");self.trace.neural=false;}
-                }
-            }
-        }
-        #[cfg(not(target_arch = "wasm32"))]
-        let nr_active=self.trace.neural && self.trace.playing() && self.nr_live.is_some();
-        #[cfg(target_arch = "wasm32")]
-        let nr_active = false;
         // Keep classic nearest-neighbor pixels intact by default.
         // When SMAA is enabled, post-pixelization morphological antialiasing
         // smooths chunky pixel edges in Doom resolution, leaving HUD crisp.
-        let smaa_enabled = self.trace.smaa && !nr_active;
+        let smaa_enabled = self.trace.smaa;
         if smaa_enabled {
             let size = (self.config.width, self.config.height);
             match self.smaa_target.as_mut() {
@@ -2153,10 +2091,6 @@ impl GpuState {
                 .start_frame(&self.device, &self.queue, &view))
         } else { None };
         let post_view = smaa_frame.as_deref().unwrap_or(&view);
-        #[cfg(not(target_arch = "wasm32"))]
-        let scene_view = if nr_active && !doom_res { &self.nr_live.as_ref().expect("NR ready").view } else {post_view};
-        #[cfg(target_arch = "wasm32")]
-        let scene_view = post_view;
         let store_light = self.trace.stores_light();
         if trace {
             // World / bake shows the texel. The screen average would keep a
@@ -2193,8 +2127,6 @@ impl GpuState {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("doom_world_encoder"),
             });
-        #[cfg(not(target_arch = "wasm32"))]
-        let mut nr_cmd = None;
 
         if trace {
             if let Some(world) = self.world.as_mut() {
@@ -2439,7 +2371,7 @@ impl GpuState {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("doom_ray_blit"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: scene_view,
+                    view: post_view,
                     resolve_target: None,
                     depth_slice: None,
                     ops: wgpu::Operations {
@@ -2571,71 +2503,35 @@ impl GpuState {
                 pass.set_viewport(0.0, 0.0, rw as f32, rh as f32, 0.0, 1.0);
                 draw_weapon(&mut pass, world, scene, msaa);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            let handled_by_nr = if nr_active {
-                let image = self.play_image.as_ref().expect("play image");
-                match self.nr_live.as_mut().expect("NR ready").encode_custom(
-                    &mut encoder,
-                    post_view,
-                    &image.view,
-                    (rw, rh),
-                    [0.0, 0.0, rw as f32, rh as f32],
-                    [vx, vy, vw, vh],
-                    self.trace.neural_strength,
-                    self.trace.neural_style as f32,
-                    self.trace.neural_mode,
-                    self.trace.neural_split_x,
-                    self.trace.neural_fsr,
-                    self.trace.neural_sharpness,
-                    true,
-                ) {
-                    Ok(cmd) => {
-                        nr_cmd = cmd;
-                        true
-                    }
-                    Err(error) => {
-                        log::error!("Neural preview stopped: {error}");
-                        self.trace.neural = false;
-                        false
-                    }
-                }
-            } else {
-                false
-            };
-            #[cfg(target_arch = "wasm32")]
-            let handled_by_nr = false;
-
-            if !handled_by_nr {
-                let image = self.play_image.as_ref().expect("play image");
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("doom_play_blit"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: post_view,
-                        resolve_target: None,
-                        depth_slice: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    depth_stencil_attachment: None,
-                    occlusion_query_set: None,
-                    timestamp_writes: None,
-                    multiview_mask: None,
-                });
-                pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
-                pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
-                pass.set_pipeline(&self.blit.pipeline);
-                pass.set_bind_group(0, &image.bind, &[]);
-                pass.draw(0..6, 0..1);
-            }
+            let image = self.play_image.as_ref().expect("play image");
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("doom_play_blit"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: post_view,
+                    resolve_target: None,
+                    depth_slice: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            pass.set_viewport(vx, vy, vw, vh, 0.0, 1.0);
+            pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
+            pass.set_pipeline(&self.blit.pipeline);
+            pass.set_bind_group(0, &image.bind, &[]);
+            pass.draw(0..6, 0..1);
         } else if let Some(world) = self.world.as_ref() {
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("doom_world_pass"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: if msaa { &world.msaa_view } else { scene_view },
-                        resolve_target: if msaa { Some(scene_view) } else { None },
+                        view: if msaa { &world.msaa_view } else { post_view },
+                        resolve_target: if msaa { Some(post_view) } else { None },
                         depth_slice: None,
                         ops: wgpu::Operations {
                             load: wgpu::LoadOp::Clear(wgpu::Color {
@@ -2713,27 +2609,6 @@ impl GpuState {
                 pass.set_scissor_rect(vx as u32, vy as u32, vw as u32, vh as u32);
                 draw_weapon(&mut pass, world, scene, msaa);
             }
-
-            #[cfg(not(target_arch = "wasm32"))]
-            if nr_active {
-                match self.nr_live.as_mut().expect("NR ready").encode(
-                    &mut encoder,
-                    post_view,
-                    [vx, vy, vw, vh],
-                    self.trace.neural_strength,
-                    self.trace.neural_style as f32,
-                    self.trace.neural_mode,
-                    self.trace.neural_split_x,
-                    self.trace.neural_fsr,
-                    self.trace.neural_sharpness,
-                ) {
-                    Ok(cmd) => nr_cmd = cmd,
-                    Err(error) => {
-                        log::error!("Neural preview stopped: {error}");
-                        self.trace.neural = false;
-                    }
-                }
-            }
         }
 
         // SMAA owns its resolve submission. Submit the scene first, then
@@ -2771,20 +2646,7 @@ impl GpuState {
         }
         self.paint_ui(&mut encoder, &view);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(cmd) = nr_cmd {
-            self.queue.submit([encoder.finish(), cmd]);
-        } else {
-            self.queue.submit(std::iter::once(encoder.finish()));
-        }
-        #[cfg(target_arch = "wasm32")]
         self.queue.submit(std::iter::once(encoder.finish()));
-
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(nr) = self.nr_live.as_mut() {
-            nr.after_submit();
-        }
-
         output.present();
         self.maybe_save_light_bake();
         Ok(())
@@ -6887,6 +6749,3 @@ mod linear_accum_test;
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod smaa_test;
-
-#[cfg(not(target_arch = "wasm32"))]
-mod neural;
